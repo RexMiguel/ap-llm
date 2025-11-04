@@ -1,6 +1,3 @@
-En respuesta a su solicitud de mostrar el texto formateado, pero **no en una sola línea**, a continuación se presenta el objeto JSON que describe la ruta de ataque detallada, utilizando un formato estándar y legible con indentación:
-
-```json
 {
   "id": "ap-0016",
   "title": "Initial Access & Privilege Escalation: SQLi -> XSS/CSRF -> RC -> Buffer/Input Overflow -> System",
@@ -291,4 +288,3 @@ En respuesta a su solicitud de mostrar el texto formateado, pero **no en una sol
     "chisel"
   ]
 }
-```
