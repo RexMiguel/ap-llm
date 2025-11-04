@@ -17,7 +17,7 @@
       "tools": ["ping", "nmap", "whatweb", "gobuster"],
       "techniques": ["Active Scanning", "OS Fingerprinting", "Web Content Discovery"],
       "mitre_ids": ["T1595"],
-      "indicators": ["TTL 128 (Windows)", "Open ports (53, 88, 135, 445, 1433, 1337, 8080)", "IIS 7.5 web server,
+      "indicators": ["TTL 128 (Windows)", "Open ports (53, 88, 135, 445, 1433, 1337, 8080)", "IIS 7.5 web server",
       "preconditions": "Network connectivity to the target IP address.",
       "expected_outcome": "List of open services and potential web vectors.",
       "confidence": 1.0
