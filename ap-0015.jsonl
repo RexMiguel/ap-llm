@@ -1,0 +1,135 @@
+{
+  "id": "ap-0015",
+  "title": "Escalation: Jenkins RCE -> WinRM Foothold -> Active Directory Privilege Escalation",
+  "summary": "Initial access via Jenkins Remote Code Execution (RCE), credential dumping via system files, and multi-stage Active Directory privilege escalation involving rights abuse (Force Change Password and WriteOwner).",
+  "attack_path_markdown": "### Step 1\nIdentify open ports 80, 5985 (WinRM), and 8080.\n### Step 2\nExploit Jenkins RCE via authorized user functionality to obtain system secrets.\n### Step 3\nUse retrieved credentials to gain an initial shell via WinRM.\n### Step 4\nLeverage BloodHound and PowerView to escalate privileges from domain user to Domain Admin.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Scanning the target system to identify open services and basic system information.",
+      "actions": [
+        "Check host responsiveness and identify operating system based on TTL",
+        "Scan all TCP ports to discover open services",
+        "Identify specific services and versions running on open ports",
+        "Configure host file for virtual hosting resolution"
+      ],
+      "tools": ["ping", "nmap", "fast-tcp-scan", "whatweb"],
+      "techniques": ["Active Scanning", "OS Fingerprinting", "Service Enumeration"],
+      "mitre_ids": ["T1595.001", "T1046"],
+      "indicators": ["TTL 127/128 (Windows)", "Open ports 80, 5985, 8080"],
+      "preconditions": "Network connectivity to the target system.",
+      "expected_outcome": "List of open ports and resolved domain name.",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Preparation of tools and configuration necessary for exploitation and privilege escalation.",
+      "actions": [
+        "Generate a Jenkins API token for remote command execution",
+        "Prepare PowerView/SharpHound scripts for later AD enumeration",
+        "Identify system files required for credential decryption"
+      ],
+      "tools": ["Jenkins Web UI", "PowerView.ps1", "SharpHound.ps1", "Jenkins Credentials Descriptor (concept/tool)"],
+      "techniques": ["Valid Accounts (Creation)", "Credential Preparation"],
+      "mitre_ids": ["T1078.003", "T1059.001"],
+      "indicators": ["API Token created", "Decryption files identified (`master.key`, `hudson.util.secret`)"],
+      "preconditions": "Low-privileged access to the Jenkins interface.",
+      "expected_outcome": "Functional remote execution capability and necessary AD enumeration tools.",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Transmission of the remote execution command to the Jenkins server using the generated token.",
+      "actions": [
+        "Send HTTP request to trigger Jenkins job execution using credentials and API token"
+      ],
+      "tools": ["curl"],
+      "techniques": ["Remote Services (API Access)"],
+      "mitre_ids": ["T1021.001"],
+      "indicators": ["Successful build trigger notification on Jenkins"],
+      "preconditions": "Jenkins job configured for remote execution; valid username and API token.",
+      "expected_outcome": "Successful remote execution confirmation without waiting for periodic builds.",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Leveraging the RCE vulnerability to read sensitive system files and decrypt stored credentials.",
+      "actions": [
+        "Execute PowerShell commands remotely to read Jenkins configuration files",
+        "Transfer binary secret files using Base64 encoding for local decryption",
+        "Decrypt Jenkins credentials using `master.key`, `hudson.util.secret`, and user `config.xml`"
+      ],
+      "tools": ["curl", "PowerShell", "Base64 encoding/decoding", "Jenkins Credential Decryption Utility"],
+      "techniques": ["Remote Execution (RCE)", "Credential Dumping", "File Transfer Mechanisms"],
+      "mitre_ids": ["T1203", "T1003.001", "T1041"],
+      "indicators": ["Contents of `config.xml`, `master.key`, and decrypted plaintext password."],
+      "preconditions": "Functional RCE on the Jenkins server (Windows system).",
+      "expected_outcome": "Plaintext credentials for a system user ('Oliver').",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Establishing persistent remote access to the Windows machine using the compromised credentials.",
+      "actions": [
+        "Connect to the target system using Evil-WinRM with the obtained credentials"
+      ],
+      "tools": ["Evil-WinRM"],
+      "techniques": ["Remote Services: WinRM"],
+      "mitre_ids": ["T1021.006"],
+      "indicators": ["Successful interactive shell access as user 'Oliver'"],
+      "preconditions": "Valid credentials for a user with WinRM access ('Oliver').",
+      "expected_outcome": "Persistent command and control shell on the victim machine.",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Using the established WinRM session to enumerate the Active Directory environment for privilege escalation paths.",
+      "actions": [
+        "Download and import PowerView module on the target machine",
+        "Execute BloodHound data collection scripts (SharpHound)",
+        "Analyze BloodHound output to find escalation paths"
+      ],
+      "tools": ["Evil-WinRM", "PowerView", "SharpHound.ps1", "BloodHound (Client)"],
+      "techniques": ["Active Directory Discovery", "Network Service Scanning", "Transfer Scripts/Tooling"],
+      "mitre_ids": ["T1087.002", "T1018"],
+      "indicators": ["BloodHound graph showing paths: Oliver -> Smith (via Force Change Password), Smith -> Maria (via GenericWrite), Maria -> Domain Admins (via WriteOwner)."],
+      "preconditions": "Domain user shell access; BloodHound/PowerView imported.",
+      "expected_outcome": "Identified viable paths for privilege escalation to Domain Admin.",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Execution of privilege escalation steps by abusing Active Directory object rights to obtain Domain Administrator access and retrieve the final flag.",
+      "actions": [
+        "Abuse 'Force Change Password' right on user Smith to reset their password using PowerView.",
+        "Connect as Smith via WinRM.",
+        "Abuse 'GenericWrite' right on user Maria to set the 'scriptPath' attribute, forcing Maria to execute a payload on login (copying 'jenkins.xls').",
+        "Retrieve 'jenkins.xls' containing Maria's password and connect as Maria via WinRM.",
+        "Abuse 'WriteOwner' right on the 'Domain Admins' group to take ownership and add Maria to the group."
+      ],
+      "tools": ["Evil-WinRM", "PowerView"],
+      "techniques": ["Account Manipulation", "Password Spraying (Internal)", "Exploiting Default Permissions", "Domain Escalation"],
+      "mitre_ids": ["T1098", "T1552.006", "T1484.002"],
+      "indicators": ["User Maria successfully added to 'Domain Admins'", "Successful retrieval of the final flag."],
+      "preconditions": "Identified rights abuses; access to required PowerView functions.",
+      "expected_outcome": "Domain Administrator privileges and successful completion of the objective (flag retrieval).",
+      "confidence": 1.0
+    }
+  ],
+  "tactics": ["Initial Access", "Credential Access", "Discovery", "Lateral Movement", "Privilege Escalation"],
+  "techniques": ["Exploitation for Client Execution", "Remote Services", "Domain Account Manipulation", "Abuse Elevation Control Mechanisms"],
+  "mitre_ids": ["T1203", "T1021", "T1098", "T1548.002"],
+  "hosts": ["Target IP (Windows DC)", "object.htb"],
+  "privs_obtained": ["domain user (xavitar)", "domain user (oliver)", "domain user (smith)", "domain user (maria)", "Domain Admin"],
+  "confidence": 1.0,
+  "source_file": "",
+  "notes": "Multi-stage escalation path highly dependent on Active Directory misconfigurations exposed via BloodHound.",
+  "labels": ["attack_path", "jenkins", "active_directory", "winrm", "bloodhound", "privesc"]
+}

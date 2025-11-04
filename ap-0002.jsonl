@@ -1,0 +1,162 @@
+{
+  "id": "ap-0002",
+  "title": "Privilege Escalation: VHD Hash Extraction -> SSH Initial Access -> mRemoteNG Credential Theft -> WinRM DA",
+  "summary": "Exploitation of weak SMB permissions to obtain a system backup file (VHD), enabling credential extraction, initial access via SSH, discovery of stored privileged credentials in application configuration files, and final administrative access via WinRM.",
+  "attack_path_markdown": "### Step 1\nPerform active reconnaissance to identify open ports and services, confirming SMB (445), SSH (22), and WinRM (5985) are available.\n### Step 2\nExploit anonymous access via SMB to find a writable share (`Backups`) and mount the filesystem to access a Virtual Hard Disk (VHD) backup.\n### Step 3\nMount the VHD locally to extract the `SAM` and `SYSTEM` files and dump local user hashes using Impacket.\n### Step 4\nCrack the hash for the low-privileged user `LamG` to obtain the cleartext password and establish an initial foothold via SSH.\n### Step 5\nEnumerate the system to locate application configuration files containing encrypted administrator credentials.\n### Step 6\nDecrypt the stored Administrator password and achieve high-privilege access using Evil-WinRM.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Identifying the target operating system, host status, and exposed network services.",
+      "actions": [
+        "Host Discovery and OS identification",
+        "Full TCP Port Scan",
+        "Aggressive TCP SYN Scan to identify open ports"
+      ],
+      "tools": ["ping", "NMAP", "xclip (for port parsing)"],
+      "techniques": ["Active Scanning", "Network Service Scanning"],
+      "mitre_ids": ["T1595.001", "T1046"],
+      "indicators": ["TTL 127/128 (Windows host)", "Open ports: 22, 135, 139, 445, 5985"],
+      "preconditions": "Network connectivity to the target host.",
+      "expected_outcome": "List of all open TCP ports and associated services.",
+      "commands": [
+        "ping 10.10.10.134",
+        "nmap -sS -p- -T5 -n -v 10.10.10.134",
+        "nmap -sS -p- --min-rate 5000 -v -v -v -n -Pn 10.10.10.134 -oG all_ports"
+      ],
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "No explicit weapon creation required for this path.",
+      "actions": [],
+      "tools": [],
+      "techniques": [],
+      "mitre_ids": [],
+      "indicators": [],
+      "preconditions": "",
+      "expected_outcome": "",
+      "commands": [],
+      "confidence": 0.0
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "No explicit delivery mechanism required; exploitation occurs directly over exposed protocols.",
+      "actions": [],
+      "tools": [],
+      "techniques": [],
+      "mitre_ids": [],
+      "indicators": [],
+      "preconditions": "",
+      "expected_outcome": "",
+      "commands": [],
+      "confidence": 0.0
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Gaining access to the system via misconfigured services and retrieving local hashes.",
+      "actions": [
+        "Enumerating SMB shares via null session",
+        "Mounting the 'Backups' share using CIFS/guest credentials",
+        "Discovering a VHD backup file (Virtual Hard Disk)",
+        "Loading Network Block Device (NBD) module and binding VHD image",
+        "Dumping NTLM hashes from the extracted SAM and SYSTEM files",
+        "Cracking the user hash to obtain cleartext password"
+      ],
+      "tools": ["crackmapexec", "smbmap", "smbclient", "mount", "modprobe", "qemu-nbd", "Impacket SecretsDump", "John"],
+      "techniques": ["Network Share Discovery", "OS Credential Dumping", "Password Cracking"],
+      "mitre_ids": ["T1135", "T1021.002", "T1003", "T1110.002"],
+      "indicators": ["Write/Read access to 'Backups' share", "5.1 GB VHD file found", "User hashes (Administrator, Guest, LamG)"],
+      "preconditions": "SMB service accessible (port 445) with weak permissions on the 'Backups' share.",
+      "expected_outcome": "Cleartext password for user LamG: 'LamG_Bureau'",
+      "commands": [
+        "crackmapexec smb 10.10.10.134",
+        "smbmap -H 10.10.10.134 -U null",
+        "mount -t cifs //10.10.10.134/Backups /mnt/smb",
+        "modprobe NBD",
+        "qemu-nbd -r /dev/nbd0 [VHD_FILE_PATH]",
+        "mount /dev/nbd0p1 /mnt/VHD",
+        "Impacket SecretsDump.py local -sam [SAM_PATH] -system [SYSTEM_PATH]",
+        "john --wordlist=/usr/share/wordlists/rockyou.txt hashes.txt --format=NT"
+      ],
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Establishing a user session on the target system for the initial foothold.",
+      "actions": [
+        "Connecting to the system via SSH using cracked credentials"
+      ],
+      "tools": ["ssh"],
+      "techniques": ["Remote Services: SSH"],
+      "mitre_ids": ["T1021.004"],
+      "indicators": ["Successful SSH connection as user LamG"],
+      "preconditions": "Valid credentials for a non-privileged user (LamG).",
+      "expected_outcome": "Command line access to the Bastion system as user LamG.",
+      "commands": [
+        "ssh LamG@10.10.10.134"
+      ],
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command & Control",
+      "description": "Internal enumeration to find potential privilege escalation vectors and retrieving sensitive information.",
+      "actions": [
+        "Enumerating local users, groups, and system information (largely denied)",
+        "Discovering installed application directory 'mRemoteNG'",
+        "Locating the 'confCons.xml' file containing encrypted connection credentials",
+        "Cloning a public decryption tool repository"
+      ],
+      "tools": ["dir", "systeminfo", "tasklist", "git"],
+      "techniques": ["File and Directory Discovery", "Credentials in Files"],
+      "mitre_ids": ["T1083", "T1552.001"],
+      "indicators": ["Presence of C:\\Users\\LamG\\AppData\\Roaming\\mRemoteNG\\confCons.xml", "Encrypted password found for user Administrator"],
+      "preconditions": "Access to the local filesystem and application data directory.",
+      "expected_outcome": "Encrypted Administrator password string obtained.",
+      "commands": [
+        "systeminfo",
+        "tasklist",
+        "dir C:\\Program Files (x86)",
+        "git clone [DECRYPTOR_REPO]"
+      ],
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Achieving the final objective of high-privilege access (Administrator/Root).",
+      "actions": [
+        "Decrypting the Administrator password using the specialized utility",
+        "Connecting to the WinRM service with Administrator credentials"
+      ],
+      "tools": ["mremote-ng-decript.py", "Evil-WinRM"],
+      "techniques": ["Remote Services: WinRM", "Privilege Escalation"],
+      "mitre_ids": ["T1021.006", "T1078.002"],
+      "indicators": ["Successful WinRM session as Administrator"],
+      "preconditions": "Decrypted Administrator password and WinRM service accessible (port 5985).",
+      "expected_outcome": "Full administrative control of the system (Root access).",
+      "commands": [
+        "python mremote-ng-decript.py -s [ENCRYPTED_PASSWORD_STRING]",
+        "evil-winrm -i 10.10.10.134 -u Administrator -p [DECRYPTED_PASSWORD]"
+      ],
+      "confidence": 1.0
+    }
+  ],
+  "tactics": ["Reconnaissance", "Initial Access", "Credential Access", "Privilege Escalation", "Command and Control", "Lateral Movement"],
+  "techniques": ["Network Service Scanning", "Network Share Discovery", "OS Credential Dumping", "Password Cracking", "Credentials in Files", "Remote Services"],
+  "mitre_ids": ["T1046", "T1135", "T1003", "T1110.002", "T1552.001", "T1021"],
+  "hosts": ["10.10.10.134", "Bastion"],
+  "privs_obtained": ["domain user (LamG)", "administrator"],
+  "confidence": 0.95,
+  "source_file": "",
+  "notes": "Procedure followed a typical CTF path: SMB file extraction -> hash dump -> low-privilege login -> internal file search -> credential decryption -> high-privilege login.",
+  "labels": ["attack_path", "windows", "smb", "winrm", "privilege_escalation"]
+}
+
+1 fuente
+¿Cómo influye la comunidad y las interacciones en directo en el proceso de ha

