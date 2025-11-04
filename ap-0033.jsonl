@@ -1,5 +1,5 @@
 {
-  "id": "ap-0029",
+  "id": "ap-0033",
   "title": "Absolute AD Compromise: AS-REP Roast, DACL Abuse, and KRB-RELAY",
   "summary": "Compromise of an Active Directory environment that strictly enforces Kerberos authentication (Protected Users Group), achieved through user enumeration, AS-REP roasting, lateral movement via credentials found in LDAP, DACL abuse for Shadow Credentials attack, and local privilege escalation using KRB-RELAY.",
   "attack_path_markdown": "### Step 1\nInitial enumeration, time synchronization, and user harvesting.\n### Step 2\nAS-REP roasting to obtain initial user credentials.\n### Step 3\nExtensive enumeration via Bloodhound/LDAP leading to discovery of SVC_SMB credentials.\n### Step 4\nExploiting a proprietary executable to capture M.Lovegod's password.\n### Step 5\nAbusing AD ACLs (DACL Edit) to gain Generic Write on a high-value group, followed by a Shadow Credential attack against WinRM_User.\n### Step 6\nExecuting KRB-RELAY locally on the Domain Controller to achieve Domain Administrator privileges.",
